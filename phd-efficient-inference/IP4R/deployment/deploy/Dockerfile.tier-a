@@ -1,0 +1,34 @@
+# Tier A — lightweight, CPU-only, no PyTorch
+# deps: numpy · opencv-headless · scikit-image · PyYAML
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# libglib2.0-0 and libgomp1 are required by OpenCV headless on Debian slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libglib2.0-0 \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install core deps first (swap opencv-python → headless; no display in container)
+COPY pyproject.toml .
+RUN pip install --no-cache-dir \
+        "numpy>=1.26" \
+        "opencv-python-headless>=4.9" \
+        "scikit-image>=0.22" \
+        "PyYAML>=6.0"
+
+# Install the package itself without re-resolving cv2 (already satisfied above)
+COPY src/ src/
+RUN pip install --no-cache-dir --no-deps .
+
+# Bake in config, reference image, ROI map, and trained model
+COPY config/   config/
+COPY data/reference/ data/reference/
+COPY models/   models/
+
+# Production data flows in and out via mounted volumes
+VOLUME ["/app/data/samples", "/app/data/results"]
+
+ENTRYPOINT ["ip4r"]
+CMD ["selfcheck"]

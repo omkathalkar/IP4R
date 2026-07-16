@@ -1,0 +1,27 @@
+services:
+
+  # ── Tier A: lightweight, training-free, CPU-real-time ───────────────────────
+  tier-a:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.tier-a
+    image: ip4r:tier-a
+    volumes:
+      - ../data/samples:/app/data/samples
+      - ../data/results:/app/data/results
+    # override CMD at runtime:  docker compose run tier-a inspect data/samples/photo.jpg
+    command: selfcheck
+
+  # ── Tier A+B: adds Anomalib PatchCore / PaDiM unsupervised detection ────────
+  tier-ab:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.tier-ab
+    image: ip4r:tier-ab
+    volumes:
+      - ../data/samples:/app/data/samples
+      - ../data/results:/app/data/results
+      - ../data/good_bank:/app/data/good_bank   # populate before enabling tier_b
+    # mount a custom config to flip tier_b.enabled: true
+    # - ../config/tier_ab.yaml:/app/config/default.yaml
+    command: selfcheck

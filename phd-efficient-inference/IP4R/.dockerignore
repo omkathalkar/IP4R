@@ -1,0 +1,13 @@
+# keep build context small — only what the Dockerfiles actually COPY
+IP4R_dataset/
+data/samples/
+data/results/
+data/good_bank/
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.egg-info/
+.git/
+.DS_Store
+*.zip

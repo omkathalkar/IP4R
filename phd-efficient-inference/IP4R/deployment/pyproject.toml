@@ -1,0 +1,34 @@
+[project]
+name = "ip4r"
+version = "0.1.0"
+description = "Image-based production QC for AC-remote LCD splash screens (golden-template inspection)"
+authors = [{ name = "Om Kathalkar" }]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "opencv-python>=4.9",
+    "scikit-image>=0.22",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# Tier B (unsupervised deep anomaly detection). Heavy: pulls PyTorch.
+# Runs CPU-only or on Apple MPS. Install with:  pip install -e ".[dl]"
+dl = [
+    "anomalib>=1.0",
+    "torch>=2.2",
+    "transformers>=4.40",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+ip4r = "ip4r.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

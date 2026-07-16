@@ -1,0 +1,62 @@
+paths:
+  reference_image: data/reference/lcd_all_on.jpg
+  roi_map: data/reference/rois.yaml
+  samples_dir: data/samples
+  results_dir: data/results
+preprocess:
+  to_gray: true
+  denoise: true
+  illumination_normalize: true
+registration:
+  enabled: true
+  method: orb_ecc
+  orb_features: 2000
+  ransac_reproj_thresh: 5.0
+  min_matches: 12
+  ecc_iterations: 100
+  ecc_eps: 1.0e-05
+tier_a:
+  enabled: true
+  roi_kinds: []                  # empty = inspect all kinds (icon, label, digit)
+  coverage:
+    enabled: true
+    active_is_dark: true
+    coverage_ratio_min: 0.6749   # calibrated at 3-sigma from 3351 good images
+    adaptive_block: 31
+    adaptive_C: 5
+  diff:
+    enabled: true
+    max_density: 0.99            # global fallback; per-ROI diff_max in rois.yaml (5-sigma)
+    blur_k: 3
+    pixel_threshold: 20
+  ssim:
+    enabled: true
+    ssim_min: 0.1945             # global fallback; per-ROI ssim_min in rois.yaml (3-sigma)
+    win_size: 7
+  segments:
+    enabled: true
+    on_coverage_min: 0.2
+    max_aspect_ratio: 1.5
+  cnn:
+    model_type: digit_cnn        # "digit_cnn" (trained) or "mnist_hf" (feature-similarity, no training)
+    model_path: models/digit_cnn.pt
+    defect_threshold: 0.45        # 1 - cos_sim; 0.45 is above rmt09/rmt13 good-bank max (0.42)
+tier_b:
+  enabled: false
+  model: patchcore
+  good_images_dir: data/good_bank
+  image_size: 256
+  anomaly_threshold: null
+decision:
+  fail_if_any_roi_fails: true
+report:
+  save_overlay: true
+  save_json: true
+  overlay_pass_color:
+  - 0
+  - 180
+  - 0
+  overlay_fail_color:
+  - 0
+  - 0
+  - 230

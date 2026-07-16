@@ -1,0 +1,42 @@
+# Tier A+B — adds PyTorch (CPU-only) + Anomalib PatchCore/PaDiM
+# Use the CPU wheel index to avoid pulling the ~2 GB CUDA bundle
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libglib2.0-0 \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Tier A core (same as tier-a image) ────────────────────────────────────────
+COPY pyproject.toml .
+RUN pip install --no-cache-dir \
+        "numpy>=1.26" \
+        "opencv-python-headless>=4.9" \
+        "scikit-image>=0.22" \
+        "PyYAML>=6.0"
+
+COPY src/ src/
+RUN pip install --no-cache-dir --no-deps .
+
+# ── Tier B extras ──────────────────────────────────────────────────────────────
+# Install CPU-only PyTorch first to avoid the CUDA wheel being pulled in later
+RUN pip install --no-cache-dir \
+        torch \
+        --index-url https://download.pytorch.org/whl/cpu
+
+RUN pip install --no-cache-dir \
+        "anomalib>=1.0" \
+        "transformers>=4.40"
+
+# ── Artefacts ─────────────────────────────────────────────────────────────────
+COPY config/         config/
+COPY data/reference/ data/reference/
+COPY models/         models/
+
+# good_bank is mounted at runtime (populated after training on real good units)
+VOLUME ["/app/data/samples", "/app/data/results", "/app/data/good_bank"]
+
+ENTRYPOINT ["ip4r"]
+CMD ["selfcheck"]
