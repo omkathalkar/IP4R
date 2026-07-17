@@ -4,10 +4,10 @@ model:
 
 video:
   frame_step: 5              # sample every N frames
-  dark_thresh: 110           # pixel < this counts as lit segment
+  dark_thresh: 125           # pixel < this counts as lit segment (raised from 110 for unseen lighting)
 
 phase2:
-  digit_score_min: 0.35      # avg segment coverage to qualify as Phase 2
+  digit_score_min: 0.25      # avg segment coverage to qualify as Phase 2 (lowered from 0.35)
   icon_max_cov: 0.12         # icon strip must be below this (blank) in Phase 2
 
 server:
