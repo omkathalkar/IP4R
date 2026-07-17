@@ -19,12 +19,19 @@ dl = [
     "torch>=2.2",
     "transformers>=4.40",
 ]
+# FQCT centralized inference server. Install with:  pip install -e ".[server]"
+server = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
+]
 dev = [
     "pytest>=8.0",
 ]
 
 [project.scripts]
-ip4r = "ip4r.cli:main"
+ip4r        = "ip4r.cli:main"
+ip4r-server = "server._main:main"
 
 [build-system]
 requires = ["setuptools>=68"]

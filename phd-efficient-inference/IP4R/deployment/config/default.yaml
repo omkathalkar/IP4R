@@ -49,6 +49,7 @@ tier_b:
   anomaly_threshold: null
 decision:
   fail_if_any_roi_fails: true
+  min_fail_rois: 2           # image FAIL only if >= this many ROIs fail (reduces FA accumulation across 28 ROIs)
 report:
   save_overlay: true
   save_json: true

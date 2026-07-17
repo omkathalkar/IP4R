@@ -1,0 +1,38 @@
+# FQCT centralized inference server — FastAPI + Uvicorn, CPU-only
+# Serves up to 10 concurrent FQCT units over LAN.
+# Build:  docker compose build fqct-server
+# Run:    docker compose up fqct-server
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# libglib2.0-0 and libgomp1 required by OpenCV headless
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libglib2.0-0 \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml .
+RUN pip install --no-cache-dir \
+        "numpy>=1.26" \
+        "opencv-python-headless>=4.9" \
+        "scikit-image>=0.22" \
+        "PyYAML>=6.0" \
+        "fastapi>=0.111" \
+        "uvicorn[standard]>=0.29" \
+        "python-multipart>=0.0.9"
+
+COPY src/    src/
+RUN pip install --no-cache-dir --no-deps .
+
+COPY server/ server/
+COPY config/ config/
+COPY data/reference/ data/reference/
+COPY models/ models/
+
+# Jobs DB and uploaded videos live on a mounted volume
+VOLUME ["/app/data/jobs"]
+
+EXPOSE 8000
+
+CMD ["python", "-m", "server._main", "--host", "0.0.0.0", "--port", "8000"]

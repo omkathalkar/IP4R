@@ -62,7 +62,9 @@ class Inspector:
                                    cnn_scorer=self._cnn_scorer)
 
         fail_any = self.cfg.get("decision.fail_if_any_roi_fails", True)
-        passed = not (fail_any and any(not r.passed for r in roi_results))
+        min_fail = int(self.cfg.get("decision.min_fail_rois", 1))
+        n_failed = sum(1 for r in roi_results if not r.passed)
+        passed = not (fail_any and n_failed >= min_fail)
 
         return InspectionResult(
             image_path=image_path,

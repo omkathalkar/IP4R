@@ -25,3 +25,16 @@ services:
     # mount a custom config to flip tier_b.enabled: true
     # - ../config/tier_ab.yaml:/app/config/default.yaml
     command: selfcheck
+
+  # ── FQCT inference server — serves up to 10 concurrent CM4 units ─────────
+  fqct-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.fqct-server
+    image: ip4r:fqct-server
+    ports:
+      - "8000:8000"          # LAN address maps directly; bind to 0.0.0.0 inside
+    volumes:
+      - ../data/jobs:/app/data/jobs      # job DB + uploaded videos (30-day retention)
+      - ../config:/app/config            # hot-reload: POST /api/config writes here
+    restart: unless-stopped
