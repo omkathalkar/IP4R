@@ -2,9 +2,9 @@
 
 > **Project:** IP4R — AC-Remote LCD Splash-Screen Quality Control  
 > **Author:** Om Kathalkar  
-> **Version:** v03  
+> **Version:** v04 (FQCT Server added)  
 > **Last updated:** July 2026  
-> **Status:** Production-ready (Tier A) · Tier B optional
+> **Status:** Production-ready · FQCT REST server live on tangent GPU machine
 
 ---
 
@@ -26,30 +26,45 @@
    - 8.1 [Option A — Python Direct Install](#81-option-a--python-direct-install)
    - 8.2 [Option B — Docker (Tier A)](#82-option-b--docker-tier-a)
    - 8.3 [Option C — Docker (Tier A+B)](#83-option-c--docker-tier-ab)
-   - 8.4 [Deployment Comparison](#84-deployment-comparison)
+   - 8.4 [Option D — FQCT REST Server](#84-option-d--fqct-rest-server)
+   - 8.5 [Deployment Comparison](#85-deployment-comparison)
 9. [Configuration Reference](#9-configuration-reference)
 10. [Operations Guide](#10-operations-guide)
 11. [Roadmap](#11-roadmap)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Repository Layout](#13-repository-layout)
+14. [FQCT Centralized Server](#14-fqct-centralized-server)
+    - 14.1 [System Overview](#141-system-overview)
+    - 14.2 [EfficientNet-B0 / dts_infer_v2 Pipeline](#142-efficientnet-b0--dts_infer_v2-pipeline)
+    - 14.3 [Phase-2 Gate](#143-phase-2-gate)
+    - 14.4 [REST API Endpoints](#144-rest-api-endpoints)
+    - 14.5 [Web Dashboard & Upload UI](#145-web-dashboard--upload-ui)
+    - 14.6 [Live Deployment (Tangent Server)](#146-live-deployment-tangent-server)
 
 ---
 
 ## 1. Executive Summary
 
-IP4R is a **training-free, CPU-real-time** visual quality-control system that inspects AC-remote LCD displays during the all-segments-on ("splash") self-test state. It compares every digit, icon, and label against a single golden-reference photograph and outputs a structured **PASS / FAIL verdict** with exact element-level localisation.
+The IP4R project delivers **two complementary production solutions** for AC-remote LCD quality control:
 
-**Key numbers (v03):**
+**IP4R Golden-Template Inspector (offline / standalone)**  
+A training-free, CPU-real-time visual QC system that compares every digit, icon, and label in a captured splash-screen image against a single golden-reference photograph and outputs a structured **PASS / FAIL verdict** with exact element-level localisation. Works from saved images, video files, or a live USB camera. No GPU, no training, no network.
 
-| Metric | Value |
-|--------|-------|
-| Detection rate | **92.7 %** |
-| False-alarm rate | **0.42 %** |
-| Calibration dataset | 3,351 good images |
-| Elements inspected | 28 ROIs (icons, digits, labels) |
-| Inference time | < 1 s per frame (CPU, MacBook Air M2) |
-| Dependencies | numpy · opencv · scikit-image · PyYAML |
-| GPU required | No (CPU-only; Apple MPS is a bonus for Tier B) |
+**FQCT Centralized REST Server (production / factory)**  
+A GPU-accelerated inference server purpose-built for the 10-unit FQCT factory floor. Each CM4-based test unit posts a DTS video clip to the server via HTTP; the server runs a Phase-2-gated **EfficientNet-B0** (`dts_p2v2_best.pth`, val_acc=0.9992) on every qualifying frame and returns a majority-vote PASS/FAIL within ≈ 8 s (CUDA). Includes a web dashboard with video upload UI for manual testing.
+
+### Key numbers
+
+| Metric | IP4R (golden-template) | FQCT Server (EfficientNet-B0) |
+|--------|----------------------|-------------------------------|
+| Detection rate | **92.7 %** | validated on 12FPS video clips |
+| False-alarm rate | **0.42 %** | — |
+| Training required | No | Model pre-trained (6,507 Phase-2 crops) |
+| Elements inspected | 28 ROIs (icons, digits, labels) | 5 segment zones (Phase-2 gate) |
+| Inference time | < 1 s per frame (CPU) | **≈ 8 s per video (CUDA RTX 3050)** |
+| Input | Single image / folder / video | MP4 video via REST POST |
+| Network required | No | Yes (LAN POST to server) |
+| GPU required | No | Yes (CUDA; falls back to CPU) |
 
 ---
 
@@ -520,24 +535,72 @@ docker compose -f deploy/docker-compose.yml run --rm tier-ab inspect data/sample
 
 ---
 
-### 8.4 Deployment Comparison
+### 8.4 Option D — FQCT REST Server
 
-| Criterion | Option A (Python) | Option B (Docker Tier A) | Option C (Docker Tier A+B) |
-|-----------|:-----------------:|:------------------------:|:---------------------------:|
-| Setup effort | Low | Medium | Medium–High |
-| Image size | ~200 MB (venv) | ~500 MB | ~3 GB |
-| GPU needed | No | No | No |
-| Live camera support | Yes | Needs `--device` flag | Needs `--device` flag |
-| Tier B support | Yes (`pip install -e ".[dl]"`) | No | Yes |
-| Reproducibility | Depends on host Python | High | High |
-| Production isolation | No | Yes | Yes |
-| Recommended for | Dev / testing | Factory line (Tier A only) | Factory line (full system) |
+**Best for:** production FQCT factory floor — 10 CM4 test units on LAN posting videos to a central GPU machine.
 
-> **Recommendation:** Use Option A for the testing team. Use Option B for production-line deployment once testing passes.
+**Architecture:** FastAPI + `ThreadPoolExecutor(10)` + SQLite job store (30-day retention).  
+**Model:** EfficientNet-B0 `models/dts_p2v2_best.pth` (Phase-2-gated).  
+**Inference:** ~8 s per video on CUDA RTX 3050.
+
+#### Install (on GPU machine)
+
+```bash
+cd /home/om/src/fqct_server
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[server]"
+```
+
+#### Start server
+
+```bash
+# Start in background on port 8080
+nohup ip4r-server --host 0.0.0.0 --port 8080 \
+    --config config/fqct_server.yaml &
+```
+
+#### Usage from a CM4 unit
+
+```bash
+# Fire-and-forget: submit a video
+curl -X POST http://<SERVER_IP>:8080/inspect_queue \
+     -F "video=@/tmp/dts_test.mp4" \
+     -F "job_id=unit03_$(date +%s)"
+
+# Poll for result after ~20 s (IR test takes ~20 s)
+curl http://<SERVER_IP>:8080/inference_result?job_id=unit03_...
+```
+
+#### Access dashboard locally via SSH tunnel
+
+```bash
+sshpass -p 'useme123' ssh -N -L 8080:localhost:8080 om@tangentthoughttech.com
+# Then open http://localhost:8080 in browser
+```
+
+---
+
+### 8.5 Deployment Comparison
+
+| Criterion | Option A (Python) | Option B (Docker Tier A) | Option C (Docker Tier A+B) | Option D (FQCT Server) |
+|-----------|:-----------------:|:------------------------:|:---------------------------:|:----------------------:|
+| Setup effort | Low | Medium | Medium–High | Medium |
+| GPU needed | No | No | No | **Yes (CUDA)** |
+| Input | Image / video file | Image / video file | Image / video file | **MP4 via HTTP POST** |
+| Live camera support | Yes | Needs `--device` flag | Needs `--device` flag | No |
+| Concurrency | 1 | 1 | 1 | **10 simultaneous jobs** |
+| Inference latency | < 1 s (image) | < 1 s (image) | < 1 s (image) | **~8 s (video, CUDA)** |
+| Model | Golden-template | Golden-template | Golden-template + Anomalib | **EfficientNet-B0** |
+| Web dashboard | No | No | No | **Yes (with upload UI)** |
+| Recommended for | Dev / testing | Factory line (image) | Factory line (full system) | **FQCT floor (10 units)** |
+
+> **Recommendation:** Use Option D (FQCT Server) for the 10-unit CM4 production floor. Use Option A/B for standalone image-based QC and testing.
 
 ---
 
 ## 9. Configuration Reference
+
+### 9.1 IP4R Golden-Template (`config/default.yaml`)
 
 All thresholds live in `config/default.yaml`. No values are hard-coded in the pipeline.
 
@@ -606,7 +669,38 @@ report:
   overlay_fail_color: [0, 0, 230]    # red
 ```
 
-### Per-ROI overrides (in rois.yaml)
+### 9.2 FQCT Server (`config/fqct_server.yaml`)
+
+```yaml
+model:
+  path: models/dts_p2v2_best.pth
+  prob_threshold: 0.5        # median P2 prob >= this → PASS
+
+video:
+  frame_step: 5              # sample every N frames
+  dark_thresh: 110           # pixel < this counts as lit segment
+
+phase2:
+  digit_score_min: 0.35      # avg segment coverage to qualify as Phase 2
+  icon_max_cov: 0.12         # icon strip must be below this (blank) in Phase 2
+
+server:
+  max_workers: 10
+  retention_days: 30
+```
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `model.path` | `models/dts_p2v2_best.pth` | EfficientNet-B0 checkpoint (relative to repo root) |
+| `model.prob_threshold` | `0.5` | Median P2 sigmoid probability threshold for PASS |
+| `video.frame_step` | `5` | Sample every Nth frame (lower = slower, more thorough) |
+| `video.dark_thresh` | `110` | Grayscale value below which a pixel is "lit" (reflective LCD, active=dark) |
+| `phase2.digit_score_min` | `0.35` | Min average segment coverage to qualify a frame as Phase 2 |
+| `phase2.icon_max_cov` | `0.12` | Icon strip must be this sparse for Phase 2 (icons should be off) |
+| `server.max_workers` | `10` | ThreadPoolExecutor workers (= max concurrent jobs) |
+| `server.retention_days` | `30` | SQLite job TTL |
+
+### 9.3 Per-ROI overrides (in rois.yaml)
 
 Individual ROIs can override global thresholds:
 
@@ -769,9 +863,11 @@ IP4R/
 ├── TESTING_GUIDE.md             Step-by-step test plan for testing team
 ├── CLAUDE.md                    Notes for Claude Code (internal)
 ├── pyproject.toml               Package definition + dependencies
+│                                  extras: [server] pulls fastapi/uvicorn/multipart
 │
 ├── config/
-│   └── default.yaml             All thresholds and pipeline switches
+│   ├── default.yaml             IP4R golden-template thresholds and switches
+│   └── fqct_server.yaml         FQCT server config (model path, thresholds, workers)
 │
 ├── data/
 │   ├── reference/
@@ -780,10 +876,30 @@ IP4R/
 │   │   └── rois.yaml            28-element ROI map (normalised coords)
 │   ├── samples/                 Put input images here
 │   ├── results/                 Overlay PNGs + JSON reports land here
-│   └── good_bank/               For Tier B training (populate before enabling)
+│   ├── good_bank/               For Tier B training (populate before enabling)
+│   └── jobs/
+│       └── jobs.db              SQLite job store (FQCT server, auto-created)
 │
 ├── models/
-│   └── digit_cnn.pt             Trained digit CNN weights (~762 KB)
+│   ├── digit_cnn.pt             Trained digit CNN weights (~762 KB)
+│   ├── dts_p2v2_best.pth        EfficientNet-B0 Phase-2 model (FQCT server)
+│   └── dts_p2v2_origin/         Backup of original training scripts from remote:
+│       ├── dts_infer_v2.py        Production inference script (Phase-2-gated)
+│       ├── dts_infer.py           v1 inference script
+│       ├── train_p2v2.py          EfficientNet-B0 Phase-2 training
+│       ├── train_p2.py            Phase-2 frame extraction training
+│       ├── train_dts.py           DTS base training
+│       ├── eval_dts_videos.py     Video evaluation script
+│       ├── phase_detect.py        Phase-2 gate logic (standalone)
+│       └── extract_p2_frames.py   Dataset builder for Phase-2 frames
+│
+├── server/                      FQCT REST server package
+│   ├── __init__.py
+│   ├── _main.py                 uvicorn entry point (ip4r-server CLI)
+│   ├── app.py                   FastAPI app: endpoints + HTML dashboard
+│   ├── worker.py                EfficientNet-B0 inference pipeline
+│   ├── lcd_crop.py              Perspective LCD crop (480×640)
+│   └── job_store.py             SQLite-backed job store (30-day retention)
 │
 ├── scripts/
 │   ├── inspect_camera.py        Live camera inspection (splash-triggered)
@@ -791,7 +907,7 @@ IP4R/
 │   ├── inspect_batch.py         Parallel batch inspection (4 workers)
 │   └── calibrate.py             Threshold calibration from good-bank images
 │
-├── src/ip4r/                    Python package
+├── src/ip4r/                    Python package (golden-template pipeline)
 │   ├── cli.py                   ip4r CLI (selfcheck/inspect/camera/synth/roi-edit)
 │   ├── pipeline.py              Inspector class — orchestrates 0→4
 │   ├── preprocess.py            Grayscale · denoise · illumination normalise
@@ -806,17 +922,219 @@ IP4R/
 │   ├── mnist_scorer.py          MNIST feature-similarity scorer (no training)
 │   └── tools/roi_editor.py      Interactive OpenCV ROI authoring tool
 │
-├── deploy/
-│   ├── Dockerfile.tier-a        Lightweight image (~500 MB, no PyTorch)
-│   ├── Dockerfile.tier-ab       Full image (~3 GB, with PyTorch + Anomalib)
-│   └── docker-compose.yml       Compose file for both tiers
-│
-├── deployment/                  Packaged release folder
-├── ip4r_deployment_v03.zip      Shareable deployment archive (805 KB)
+├── deployment/
+│   └── deploy/
+│       ├── Dockerfile.tier-a        Lightweight IP4R image (~500 MB, no PyTorch)
+│       ├── Dockerfile.tier-ab       Full IP4R image (~3 GB, with PyTorch + Anomalib)
+│       ├── Dockerfile.fqct-server   FQCT server image (FastAPI + EfficientNet-B0)
+│       └── docker-compose.yml       Compose file for all services
 │
 ├── IP4R_dataset/                Raw dataset zips (Rmt 06–13 + fault images)
 └── tests/
     └── test_pipeline.py         Pytest smoke tests
+```
+
+---
+
+## 14. FQCT Centralized Server
+
+### 14.1 System Overview
+
+The FQCT system comprises **10 CM4-based factory test units** on a single LAN, each running an automated DTS (Display Test Sequence) cycle. Every cycle:
+
+1. Unit powers the AC remote and triggers the LCD splash state (Phase 2: all segments on)
+2. Unit records a short video (~15–20 s) via an attached camera
+3. Unit POSTs the video to the central FQCT server (`/inspect_queue`)
+4. Unit continues with the IR functionality test (~20 s window)
+5. Unit polls for the verdict (`/inference_result`) and acts on PASS/FAIL
+
+The server runs on a dedicated GPU machine (tangent server, CUDA RTX 3050) and processes up to 10 simultaneous jobs via `ThreadPoolExecutor(10)`.
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                    FQCT Factory Floor (LAN)                    │
+│                                                                │
+│   CM4 Unit 01 ─┐                                              │
+│   CM4 Unit 02 ─┤                                              │
+│   CM4 Unit 03 ─┤   POST /inspect_queue   ┌──────────────────┐ │
+│   CM4 Unit 04 ─┼──────────────────────── │  FQCT Server     │ │
+│   CM4 Unit 05 ─┤   GET  /inference_result│  FastAPI + GPU   │ │
+│   CM4 Unit 06 ─┤                         │  EfficientNet-B0 │ │
+│   CM4 Unit 07 ─┤                         │  Port 8080       │ │
+│   CM4 Unit 08 ─┤                         └──────────────────┘ │
+│   CM4 Unit 09 ─┤                                              │
+│   CM4 Unit 10 ─┘                                              │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Cycle time budget:**
+
+| Phase | Duration | Notes |
+|-------|----------|-------|
+| Video upload + Phase-2 gate | ~3–5 s | Depends on video length and frame_step |
+| EfficientNet-B0 inference | ~3–5 s | On CUDA RTX 3050 |
+| Total server inference | **~8 s** | Comfortably within 20 s IR window |
+
+---
+
+### 14.2 EfficientNet-B0 / dts_infer_v2 Pipeline
+
+The FQCT server runs the same pipeline as `models/dts_p2v2_origin/dts_infer_v2.py` from the tangent server:
+
+```
+Video file (MP4)
+       │
+       ▼  sample every frame_step (default 5) frames
+┌─────────────────┐
+│  detect_lcd()   │  CLAHE → GaussianBlur → Otsu → morphClose
+│  lcd_crop.py    │  → contour → 4-pt perspective transform
+└────────┬────────┘  → 480×640 BGR crop
+         │
+         ▼  per-frame
+┌─────────────────────┐
+│  _phase2_score()    │  avg segment coverage > 0.35
+│  Phase-2 gate       │  AND total_dark > 0.15
+└────────┬────────────┘
+         │  Phase-2 frames only
+         ▼
+┌─────────────────────┐
+│  EfficientNet-B0    │  sigmoid(logit) → prob_pass ∈ [0, 1]
+│  dts_p2v2_best.pth  │  val_acc = 0.9992, 6,507 Phase-2 crops
+└────────┬────────────┘
+         │  collect all p2_probs
+         ▼
+┌─────────────────────┐
+│  Majority vote      │  median(p2_probs) >= 0.5 → PASS
+│  Verdict            │  save best_p2_frame.jpg + overlay.jpg
+└─────────────────────┘
+```
+
+**Model details:**
+
+| Property | Value |
+|----------|-------|
+| Architecture | EfficientNet-B0 (torchvision) |
+| Classifier head | `Linear(1280 → 1)` (single logit, sigmoid) |
+| Checkpoint | `models/dts_p2v2_best.pth` (`ckpt['state_dict']`) |
+| Training data | 6,507 Phase-2 LCD crop images |
+| Val accuracy | 0.9992 |
+| Device priority | CUDA > MPS > CPU |
+| Input transform | Resize(224,224) → ToTensor → Normalize(ImageNet) |
+
+---
+
+### 14.3 Phase-2 Gate
+
+The Phase-2 gate identifies frames where **all LCD segments are on** (the DTS all-segments-on state). It operates on the 480×640 BGR crop:
+
+**Segment ROIs** (coordinates on 480×640 canvas):
+
+| Zone | y1 | y2 | x1 | x2 | Min coverage |
+|------|----|----|----|----|--------------|
+| `left_clock` | 140 | 205 | 70 | 195 | 0.38 |
+| `right_clock` | 140 | 205 | 235 | 380 | 0.25 |
+| `center_88` | 215 | 305 | 70 | 190 | 0.60 |
+| `signal_bars` | 250 | 305 | 310 | 390 | 0.35 |
+| `bottom_88888` | 405 | 455 | 175 | 395 | 0.55 |
+
+**Icon strip** (must be sparse / blank in Phase 2):  
+`y: [90, 140]`, `x: [85, 400]` — icon coverage should be **< 0.12**
+
+**Gate logic:**
+```python
+digit_score = mean([cov(zone) for zone in _SEG_ROIS])
+is_phase2   = (digit_score > 0.35) AND (total_dark_fraction > 0.15)
+```
+
+Frames failing this gate are skipped entirely — the EfficientNet-B0 only sees confirmed Phase-2 frames.
+
+---
+
+### 14.4 REST API Endpoints
+
+All endpoints are on port **8080** (live server) or 8000 (Docker).
+
+| Method | Endpoint | Body / Query | Response |
+|--------|----------|-------------|---------|
+| `POST` | `/inspect_queue` | `multipart: video (file), job_id (str)` | `{"job_id": "...", "status": "pending"}` |
+| `GET` | `/inference_result` | `?job_id=<id>` | Full result dict (see below) |
+| `GET` | `/health` | — | `{"status": "ok", "model": "loaded", ...}` |
+| `GET` | `/jobs/status` | — | `{"pending": N, "processing": N, "done": N, "error": N, "avg_inference_ms": ...}` |
+| `GET` | `/jobs/recent` | `?limit=50` | List of last N job summaries |
+| `GET` | `/jobs/{job_id}/overlay` | — | JPEG overlay image (best P2 frame) |
+| `GET` | `/` | — | HTML dashboard with upload UI |
+
+**Result dict** from `/inference_result`:
+```json
+{
+  "job_id": "unit03_1752000000",
+  "passed": true,
+  "verdict": "PASS",
+  "median_p2_prob": 0.9395,
+  "best_frame_prob": 0.9812,
+  "p2_frames": 14,
+  "p2_pass": 13,
+  "p2_fail": 1,
+  "total_cropped": 47,
+  "prob_threshold": 0.5,
+  "roi_results": [...],
+  "inference_ms": 7832.4
+}
+```
+
+**Job statuses:** `pending` → `processing` → `done` | `error`
+
+---
+
+### 14.5 Web Dashboard & Upload UI
+
+Accessible at `http://<server>:8080/` (or via SSH tunnel for local access).
+
+**Dashboard features:**
+- Live job statistics table (pending / processing / done / error counts, avg inference ms)
+- Recent jobs table: Job ID · Status · Verdict (green PASS / red FAIL) · P2 prob · P2 frames · Inference ms · Created · Error
+- **Video upload form**: paste/enter a Job ID, select an MP4 file, submit → polls `/inference_result` every 2 s until done → displays verdict with per-segment ROI table and overlay image link
+
+**Access via SSH tunnel (from local machine):**
+```bash
+sshpass -p 'useme123' ssh -N -L 8080:localhost:8080 om@tangentthoughttech.com
+# Open http://localhost:8080 in browser
+```
+
+---
+
+### 14.6 Live Deployment (Tangent Server)
+
+**Server:** `om@tangentthoughttech.com`  
+**Path:** `/home/om/src/fqct_server/`  
+**Port:** 8080 (port 8000 blocked by Docker bridge on `172.17.0.1`)  
+**GPU:** CUDA RTX 3050  
+**Model symlink:** `models/dts_p2v2_best.pth` → `/home/om/src/ip4r_v2/models/dts_p2v2_best.pth`
+
+**Start / stop:**
+```bash
+# SSH in
+sshpass -p 'useme123' ssh om@tangentthoughttech.com
+
+# Kill existing instance
+kill $(lsof -ti:8080) 2>/dev/null; sleep 1
+
+# Start fresh
+cd /home/om/src/fqct_server
+source .venv/bin/activate
+nohup ip4r-server --host 0.0.0.0 --port 8080 \
+    --config config/fqct_server.yaml > server.log 2>&1 &
+
+# Check logs
+tail -f server.log
+```
+
+**Sync local changes to remote:**
+```bash
+scp server/app.py server/worker.py server/lcd_crop.py server/job_store.py \
+    om@tangentthoughttech.com:/home/om/src/fqct_server/server/
+scp config/fqct_server.yaml \
+    om@tangentthoughttech.com:/home/om/src/fqct_server/config/
 ```
 
 ---

@@ -25,7 +25,7 @@ from pathlib import Path
 
 import yaml
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .job_store import JobStore
@@ -127,6 +127,14 @@ async def status():
     s["workers"] = _max_workers
     s["model"]   = str(_model_path.name)
     return s
+
+
+@app.get("/jobs/{job_id}/overlay", summary="Overlay JPEG for a completed job")
+async def job_overlay(job_id: str):
+    overlay = _JOBS_DIR / job_id / "overlay.jpg"
+    if not overlay.exists():
+        raise HTTPException(status_code=404, detail="Overlay not ready")
+    return FileResponse(str(overlay), media_type="image/jpeg")
 
 
 @app.get("/api/jobs", summary="Recent job history")
@@ -234,6 +242,8 @@ _FALLBACK_HTML = """<!doctype html>
   <div id="result-box">
     <div class="verdict" id="r-verdict"></div>
     <div class="meta" id="r-meta"></div>
+    <img id="r-overlay" src="" alt="overlay"
+         style="display:none;width:100%;max-width:480px;border-radius:8px;margin:12px 0;border:1px solid #333" />
     <table id="r-rois"><tr><th>Segment</th><th>Coverage</th><th>Min</th><th>Status</th></tr></table>
   </div>
 </div>
@@ -251,7 +261,7 @@ _FALLBACK_HTML = """<!doctype html>
 <table>
   <thead><tr>
     <th>Job ID</th><th>Status</th><th>Verdict</th>
-    <th>P2 prob</th><th>P2 frames</th><th>Inference (ms)</th><th>Created</th><th>Error</th>
+    <th>P2 prob</th><th>P2 frames</th><th>Inference (ms)</th><th>Created</th><th>Overlay</th><th>Error</th>
   </tr></thead>
   <tbody id="jobs"></tbody>
 </table>
@@ -340,6 +350,10 @@ function showResult(data) {
     `P2 frames: ${res.p2_pass ?? '—'}/${res.p2_frames ?? '—'}  |  ` +
     `Inference: ${res.inference_ms != null ? res.inference_ms.toFixed(0)+'ms' : '—'}`;
 
+  const ovrEl = document.getElementById('r-overlay');
+  ovrEl.src = `/jobs/${encodeURIComponent(data.job_id)}/overlay?t=` + Date.now();
+  ovrEl.style.display = 'block';
+
   const tbody = document.getElementById('r-rois');
   const rows  = (res.roi_results || []).filter(r => r.name !== 'icon_strip');
   tbody.innerHTML = '<tr><th>Segment</th><th>Coverage</th><th>Min</th><th>Status</th></tr>' +
@@ -373,14 +387,18 @@ async function load() {
     const prob = res.median_p2_prob != null ? (res.median_p2_prob*100).toFixed(1)+'%' : '—';
     const p2   = res.p2_frames != null ? `${res.p2_pass}/${res.p2_frames}` : '—';
     const ts   = new Date(r.created_at*1000).toLocaleString();
+    const ovr = r.status==='done'
+      ? `<a href="/jobs/${encodeURIComponent(r.job_id)}/overlay" target="_blank"
+             style="color:#4fc3f7;text-decoration:none">⬜ overlay</a>` : '—';
     return `<tr>
-      <td>${r.job_id}</td>
+      <td style="font-size:.75rem">${r.job_id}</td>
       <td class="${cls}">${r.status}</td>
       <td class="${vcls}">${verdict}</td>
       <td>${prob}</td>
       <td>${p2}</td>
       <td>${r.inference_ms != null ? r.inference_ms.toFixed(0) : '—'}</td>
       <td>${ts}</td>
+      <td>${ovr}</td>
       <td style="color:#ef5350;font-size:.75rem">${r.error||''}</td>
     </tr>`;
   }).join('');
