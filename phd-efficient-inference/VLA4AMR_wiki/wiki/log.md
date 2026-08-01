@@ -3,6 +3,145 @@
 Append-only. Each entry: `## [YYYY-MM-DD] type | title`
 Types: ingest | query | lint | decision | milestone | setup
 
+## [2026-08-01] milestone | Phase 7 COMPLETE — TIC-VLA trained checkpoint: CoT logging + accuracy eval on Ada HPC
+
+**Job:** SLURM 2661166 on gnode052 (Ada HPC, RTX 2080 Ti) — completed
+**Checkpoint loaded:** `TIC-VLA-model.ckpt` (1.9 GB, epoch=9, PyTorch Lightning) — confirmed on simulator at 3 paths:
+- `~/VLA4AMR/checkpoints/tic-vla/TIC-VLA-model.ckpt`
+- `~/Desktop/tic-vla-full-ckpt/TIC-VLA-model.ckpt`
+- `~/Desktop/TIC-VLA-model.ckpt`
+
+Copied to Ada: `/ssd_scratch/om.kathalkar/checkpoints/tic-vla/TIC-VLA-model.ckpt`
+
+**Loading strategy** (both components):
+- VLM weights: `model.load_vlm_checkpoint(ckpt_path)` handles `model.vlm.*` key remapping → `TICVLA_VLM`
+- ActionExpert weights: 50 keys under `model.action_expert.*`; stripped and loaded into `model.action_expert` separately
+- Total checkpoint keys: 1,324 (VLM fine-tuned + ActionExpert trained)
+
+**Experiment config:**
+- Dataset: VLN-PE val_unseen (scenes `17DRP5sb8fy`, `rPc6DW4iMge`), 5 episodes per scene
+- Steps: 10 per episode (spread), delayed window = 3 frames → 100 total inference calls
+- Ground truth: parquet `observation.robot_position` (3D), `observation.robot_yaw`, `observation.action` (0=STOP, 1=FWD, 2=LEFT, 3=RIGHT)
+
+**Results:**
+
+| Metric | Value |
+|---|---|
+| Mean latency | **5.84 s** (down from 7.29 s base — trained VLM generates shorter, task-focused CoT) |
+| Mean WP magnitude | **0.4603** (vs ~0.0001 for random ActionExpert — 4,600x larger) |
+| Heading error mean | 101.2° (n=92 steps with GT motion) |
+| Heading error median | 130.3° |
+| Heading error p95 | 174.7° |
+
+Per GT action class:
+
+| GT Action | N | Mean WP mag | Mean heading err |
+|---|---|---|---|
+| FWD | 60 | 0.5037 | 102.6° |
+| LEFT | 12 | 0.3119 | 78.2° |
+| RIGHT | 28 | 0.4311 | 106.6° |
+
+**Key findings:**
+1. **ActionExpert is functional**: WP magnitude 0.46 (trained) vs 0.0001 (random) confirms trained weights load and produce real, structured displacements
+2. **Latency drops with trained weights**: 5.84 s vs 7.29 s base — trained VLM generates more concise navigation-relevant responses (400–440 tokens vs 500–960 tokens)
+3. **Heading error is high (101°)**: Expected — this checkpoint was trained on BW17 warehouse data, NOT on VLN-PE Matterport3D environments. Same domain mismatch as BW18 (robot turned left despite "turn right" instruction)
+4. **LEFT class has lowest heading error (78°)**: Turning commands show better directional signal
+5. **100 CoT reasoning traces logged**: Qualitative analysis of scene descriptions pending
+
+**Interpretation vs BW18 (2026-07-11):** This is the same checkpoint used in BW18 `--full-ckpt` mode on the simulator. The high heading error on VLN-PE confirms: the ActionExpert produces non-trivial, non-zero waypoints but in wrong directions for unseen environments. Needs VLN-PE or warehouse fine-tuning to align.
+
+**Next step:** Fine-tune ActionExpert on VLN-PE ground truth trajectories (available on Ada ssd_scratch), or run inference on BW17-style warehouse episodes for an in-distribution accuracy test.
+
+**Artifacts (local):** `~/Downloads/ticvla_phase7/phase7_cot_log.jsonl`, `phase7_summary.json`
+
+---
+
+## [2026-07-31] milestone | Phase 5 + 6 — TIC-VLA latency baseline on InternData-N1
+
+**Context:** TIC-VLA's trained nav checkpoint is not released publicly. Phases 5 and 6 ran the base InternVL3-1B backbone through the TIC-VLA wrapper to establish inference latency baselines. ActionExpert had random weights; waypoints are numerically meaningless. Navigation accuracy was NOT evaluated.
+
+**Phase 5 — VLN-PE val_unseen (Ada HPC, SLURM 2661004):**
+- Dataset: `InternData-N1 vln_pe/`, scenes `17DRP5sb8fy` + `rPc6DW4iMge`, LeRobot v2.1 format
+- Images: `.npy` arrays `(T, 256, 256, 3)` uint8, converted to temp JPGs per call
+- Config: 20 episodes × 5 steps = 100 calls; delayed window = 3 frames
+
+| Metric | Value |
+|---|---|
+| Mean latency | 7.29 s |
+| Median | 7.57 s |
+| p95 | 7.63 s |
+| p99 | 7.81 s |
+| 2-tile mean | 6.90 s |
+| 4-tile mean | 7.39 s |
+
+**Phase 6 — VLN-CE val_unseen (Ada HPC, SLURM 2661004):**
+- Dataset: `InternData-N1 vln_ce/`, scene `pRbA3pwrgk9` (135 episodes, 20 used)
+- Images: individual `.jpg` per step — `episode_XXXXXX_STEP.jpg`, 640×480 px
+- Viewpoint: `rgb.125cm_0deg` (primary forward-facing)
+
+| Metric | Value |
+|---|---|
+| Mean latency | 7.38 s |
+| Median | 7.66 s |
+| p95 | 7.79 s |
+| p99 | 7.92 s |
+| 2-tile mean | 7.09 s |
+| 4-tile mean | 7.45 s |
+
+**Key finding — resolution vs latency:**
+Despite 6.25× resolution increase (256×256 → 640×480 JPEG), mean latency increases by only +0.09 s (+1.2%). InternVL3-1B on RTX 2080 Ti is **generation-bound**, not vision-bound. Response length (400–960 tokens) dominates wall-clock time. Image tokenization cost is negligible.
+
+**Data format difference (VLN-PE vs VLN-CE):**
+- VLN-PE: `episode_{idx:06d}.npy` — stacked frames `(T, H, W, 3)`, one file per episode
+- VLN-CE: `observation.images.rgb.125cm_0deg/episode_{idx:06d}_{step}.jpg` — individual JPGs per step, multiple viewpoints
+- VLN-CE parquet has full ground truth per step: `robot_position (3D)`, `robot_yaw`, `action (0-3)`, `progress (0–1)`
+
+**Artifacts (local):**
+- `~/Downloads/ticvla_phase5/phase5_latency.csv`, `phase5_summary.json`
+- `~/Downloads/ticvla_phase6/phase6_latency.csv`, `phase6_summary.json`
+- `~/Downloads/ticvla_results_summary.md` — cross-dataset comparison doc
+
+**GPU / env:** gnode052 (RTX 2080 Ti, sm_75, no FlashAttention2), Ada HPC `u22` partition, `vla` conda env (torch 2.8.0+cu128, transformers 4.57.6), `module load u22/cuda/12.9`
+
+---
+
+## [2026-07-31] setup | DynaNav_data.zip transferred from simulator to Ada HPC
+
+**Source:** `cvit-car-simulator@10.2.141.227:/home/cvit-car-simulator/DynaNav_data.zip` (73 GB)
+**Destination:** `/scratch/om.kathalkar/DynaNav_data.zip` on gnode052 (Ada HPC)
+- `/scratch` on gnode052 = `/dev/sdb1`, 1.8 TB HDD, 1.7 TB free (world-writable, sticky bit)
+**Transfer method:** SLURM job 2661085 on gnode052, `sshpass scp` over internal IIIT network (~4 h at ~5 MB/s)
+**Status:** Transfer in progress as of 2026-07-31 15:29 IST
+
+**Context:** BW17 warehouse dataset (14,360 TIC-VLA JSON sample dirs, 560 episodes, 9 task types) needs to reach Ada HPC for potential retraining or dataset analysis without requiring simulator machine access.
+
+---
+
+## [2026-07-26] setup | BW19 — MobileVLA-R1 Isaac Sim integration initiated
+
+**Script:** `bw19_sim_vla.py` — MobileVLA-R1 (NaVILAImageInference) paired with `bw11_sim_isaac.py`
+**Model:** `AIGeeksGroup/MobileVLA-R1` — downloading to `~/VLA4AMR/checkpoints/mobilevla-r1/`
+**Conda env:** `mobilevla` (Python 3.10, torch 2.3+cu121) — setting up on simulator machine
+**Key design:**
+- Same IPC protocol as BW18 (`/tmp/bw11_ipc/`, `action.json` with `{lin, ang}`)
+- `generate_response()` → `ActionExtractor.extract_velocity_vector()` → `[x_vel_cmd, yaw_vel_cmd]` → `(lin, ang)`
+- Prompt asks for `<answer>[x_vel_cmd, 0.0, yaw_vel_cmd]</answer>` format
+- Up to 8 frames of history fed as multi-image context
+
+**Status:** Download + env setup running in background. Script uploaded to `~/VLA4AMR/code/bw19_sim_vla.py`
+
+**Run command (once setup is done):**
+```bash
+source ~/miniconda3/etc/profile.d/conda.sh && conda activate mobilevla
+CUDA_VISIBLE_DEVICES=0 python3 ~/VLA4AMR/code/bw19_sim_vla.py \
+    --model-path ~/VLA4AMR/checkpoints/mobilevla-r1 \
+    --instruction "Navigate to the charging station on the left" \
+    --output-video ~/Desktop/bw19_sim_demo.mp4 \
+    2>&1 | tee ~/Desktop/bw19_sim_vla.log
+```
+
+---
+
 ## [2026-07-11] milestone | Full-ckpt DEMO — Original TIC-VLA pretrained checkpoint in Isaac Sim
 
 **Script:** `bw18_sim_vla.py --full-ckpt` (new `--full-ckpt` mode added to support single-file Lightning checkpoints)
