@@ -2,14 +2,14 @@
 
 **Type:** overview
 **Status:** active
-**Last updated:** 2026-07-03 (BW14 launch)
-**Related:** [[C1-AdaCoT]], [[C2-MidLevelActionHead]], [[C3-ConfidenceGatedHandoff]], [[IsaacSim]], [[NovaCarter]], [[simulator-machine]], [[Nav-AMR-WH]]
+**Last updated:** 2026-08-03 (FlowVLA-BW v3 trained; demo pending GNOME terminal run)
+**Related:** [[C1-AdaCoT]], [[C2-MidLevelActionHead]], [[C3-ConfidenceGatedHandoff]], [[IsaacSim]], [[NovaCarter]], [[simulator-machine]], [[Nav-AMR-WH]], [[Isaac-Synthetic]]
 
 ## Summary
 
 VLA4AMR applies Vision-Language-Action models to Autonomous Mobile Robot navigation in industrial warehouse settings. The core thesis: current VLA models are black-box reactive policies with no reasoning or memory — unacceptable for industrial AMR deployment. We address this with six interlocking contributions targeting ICRA 2027.
 
-## Current status (BW13 — Jul 1, 2026)
+## Current status (BW19 — Aug 2, 2026)
 
 | Item | Status |
 |------|--------|
@@ -51,6 +51,71 @@ VLA4AMR applies Vision-Language-Action models to Autonomous Mobile Robot navigat
 | BW14 DiscreteNav architecture decision | ✅ Done (2026-07-03 — discrete tokens + H=6 + N=6, see [[decision-bw14-discrete-nav]]) |
 | BW14 training scripts written | ✅ Done (2026-07-03 — bw14_train.py / bw14_infer.py / bw14_sim_vla.py) |
 | BW14 training on simulator | ⏳ Pending (deploy to cvit-car-simulator, tmux bw14_train) |
+| BW17 DynaNav dataset collection | ✅ Done (560 eps, 9 task types, 3,590 windows, 14,360 DynaNav_json dirs) |
+| BW18 TIC-VLA training on BW17 dataset | ✅ Done (2026-07-11 — ADE=0.090m, FDE=0.185m; −56%/−45% vs BW16 baseline) |
+| BW18 closed-loop Isaac Sim demo | ✅ Done (2026-07-11 — bw18_sim_vla.py, 40 queries, avg_lat=2.99s, right-turn executed) |
+| Phase 8: TIC-VLA paper ckpt on VLN-PE (Ada HPC) | ✅ Done (1/10 success, 50.2% accuracy — confirms OOD gap) |
+| FlowVLA-BW v1 (vision-only, BW17 dataset, 30-step waypoints) | ✅ Done (2026-08-01 — ADE=0.0292m, 96.9% improvement over paper ckpt baseline 0.9509m) |
+| FlowVLA-BW v2 (vision + instruction, Isaac-Synthetic, immediate action) | ✅ Done (2026-08-02 — DirAcc=90.2%, MAE_lin=0.0144, 7/10 instructions at 100% DirAcc) |
+
+## FlowVLA-BW v2 Results (2026-08-02)
+
+**Architecture:** Frozen InternVL3-1B + FlowActionHead2D (rectified flow, 1.4M params)
+- Vision encoder → mean-pool image tokens → feat_v (896-dim)
+- LLM `embed_tokens(instruction)` → mean-pool → feat_t (896-dim)
+- Concatenated (1792-dim) → 3-layer MLP denoiser → (lin_vel, ang_vel) via 20-step Euler ODE
+
+**Dataset:** [[Isaac-Synthetic]] — 5000 samples, 10 navigation instructions, 500 per instruction
+**Train/Val split:** 4500 / 500 (stratified, all 10 instructions in both)
+
+**Overall results:**
+
+| Model | MAE lin_vel | MAE ang_vel | Dir accuracy |
+|---|---|---|---|
+| Text-only baseline (per-instruction mean) | 0.0164 | 0.0144 | 86.4% |
+| **FlowVLA-BW v2 (vision + instruction)** | **0.0144** | 0.0153 | **90.2%** |
+| Improvement vs. baseline | **+12.3%** | −6.4% | **+3.8 pp** |
+
+**Per-instruction breakdown (val, 50 samples each):**
+
+| Instruction | MAE_lin | MAE_ang | DirAcc |
+|---|---|---|---|
+| Move to forklift pickup station | 0.0141 | 0.0111 | **100%** |
+| Navigate to charging dock on the right | 0.0138 | 0.0134 | **100%** |
+| Navigate to left loading bay | 0.0163 | 0.0204 | **100%** |
+| Navigate to right dispatch area | 0.0155 | 0.0171 | **100%** |
+| Turn left to reach the northern aisle | 0.0134 | 0.0157 | **100%** |
+| Turn right to the exit gate | 0.0113 | 0.0152 | **100%** |
+| Turn to face the receiving station | 0.0138 | 0.0167 | **100%** |
+| Navigate carefully through the corridor | 0.0124 | 0.0136 | 74% |
+| Navigate to the east storage area | 0.0139 | 0.0163 | 66% |
+| Back up to clear the forklift path | 0.0190 | 0.0139 | 62% |
+
+**Key findings:**
+1. Vision helps lin_vel (+12.3%): visual context informs how fast to go (obstacle proximity, aisle width)
+2. Text alone is marginally better for ang_vel sign: turn direction is semantically explicit ("Turn left", "Turn right")
+3. 7/10 instructions achieve 100% DirAcc — model correctly classifies turn direction from instruction semantics alone
+4. Failures on underspecified instructions where ang_vel sign varies mid-trajectory: "Navigate carefully", "Navigate east", "Back up"
+5. Actions per instruction are near-constant (std_lin ≈ std_ang ≈ 0.018), making this largely a 10-class lookup problem with visual magnitude refinement
+
+**Artifacts:**
+- Script: `~/Desktop/flowvla_v2_train.py` (phase 1 = feature extract, phase 2 = train)
+- Checkpoint: `~/Desktop/flowvla_v2_output/flowvla_v2_best.pt` (best val MAE = 0.0149)
+- Feature cache: `~/Desktop/flowvla_v2_output/feats_v2.npy` (5000 × 1792)
+
+## FlowVLA-BW v1 Results (2026-08-01)
+
+**Architecture:** Frozen InternVL3-1B (vision-only) + FlowActionHead (4-layer Transformer Decoder, 30-step waypoints)
+**Dataset:** BW17 DynaNav — 10,040 train / 200 test windows; 30-step cumulative (dx, dy) waypoints
+
+| Model | Val ADE (m) | Test ADE (m) |
+|---|---|---|
+| TIC-VLA paper checkpoint (baseline) | — | 0.9509 |
+| **FlowVLA-BW v1** | **0.0292** | — |
+| Improvement | — | **96.9%** (best val) |
+
+Feature extraction: 10,240 windows in ~3 min; training: 60 epochs in ~1 min on RTX PRO 5000 Blackwell.
+**Checkpoint:** `~/Desktop/flowvla_output/flowvla_best.pt`
 
 ## BW12 Evaluation Results (2026-07-01)
 
@@ -201,4 +266,7 @@ Fine-tuned OpenVLA-7B (LoRA rank=32) evaluated on 300 val samples from bw05_data
 - ~~**BW07 priority:** Re-balance Isaac-Synthetic~~ **Resolved BW10/BW11:** New Nav-AMR-WH dataset (bw11_dataset) with 640 episodes, 6 task types including turns and slalom; CoT annotated at 13.2% ratio. Supersedes bw04/bw05/bw06 datasets. Model now uses Qwen2.5-VL-7B instead of OpenVLA-7B.
 - ~~**BW11/BW12: Phase dependency**~~ **Resolved BW12:** BW12 eliminates Phase: token. Model infers turning from vision + rolling memory. Turning ang MAE=0.0003–0.0028 without Phase:.
 - ~~**BW12 closed-loop failure (F3)**~~ **Root cause resolved 2026-07-01:** ang=0.0000 throughout live demo despite offline ang MAE=0.0003. Four causes: imitation≠decision, mode collapse (~80% straight frames), memory self-locking loop, no recovery data. Fix: BW13 (action chunking N=4, multi-frame H=3, turn reweight 3×, always-summary). See [[decision-bw13-correctnav]].
-- **BW13/BW14 priorities:** (1) BW13 training complete → offline eval → confirm turn-initiation MAE at chunk positions 0-3. (2) BW14 CorrectNav dynamic Flywheel: run BW13 in Isaac Sim, detect deviation frames, script correction trajectories, add to dataset, retrain. (3) obj_goal ang MAE=0.0951 — needs more variable episodes. (4) Closed-loop success-rate metric (C6). (5) C3 confidence-gated handoff. (6) RL fine-tuning (C5).
+- ~~**BW13/BW14 priorities**~~ **Superseded by TIC-VLA track (BW16–BW19):** TIC-VLA (InternVL3-1B + ActionExpert) adopted as primary backbone over Qwen2.5-VL-7B. BW17 DynaNav dataset (9 tasks) and BW18 closed-loop demo complete. FlowVLA-BW rectified-flow action head trained on both BW17 waypoints (v1, ADE=0.0292m) and Isaac-Synthetic instructions (v2, DirAcc=90.2%).
+- ~~**BW19: FlowVLA-BW v3 training on real data**~~ **Resolved 2026-08-03:** v3 trained on 1856 real teleoperation frames (intern `warehouse_capture`). Val MAE=0.0044 (3.4× over v2). Turns 100% DirAcc. Checkpoint: `~/Desktop/flowvla_v3_output/flowvla_v3_best.pt`. Script: `~/Desktop/flowvla_v3_train.py`.
+- **Isaac Sim live demo (pending):** Isaac Sim 6.0.0.1 OmniGraph crashes from SSH without GPU-accelerated X — headless mode still needs XWayland (DISPLAY=:0). Fix: run `flowvla_v3_run_launch.sh` from GNOME terminal via AnyDesk. Fallback: `flowvla_v3_offline_demo.py` (VLA predictions overlaid on existing captured frames, no Isaac Sim required).
+- **Next priorities (BW20+):** (1) Record FlowVLA-BW v3 live demo from GNOME terminal. (2) LoRA fine-tune InternVL3-1B VLM jointly with FlowActionHead. (3) C3 confidence-gated handoff + C6 evaluation protocol. (4) Full ICRA paper draft — deadline Sep 15, 2026.

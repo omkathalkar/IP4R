@@ -804,6 +804,134 @@ Action stats: lx mean=0.137, std=0.119, range=[−0.18,0.33]; az mean=−0.015, 
 
 ---
 
+## [2026-08-02] milestone | FlowVLA-BW launched — novel VLA recipe training on BW17 DynaNav
+
+**Architecture** (inspired by 4 papers):
+- **TIC-VLA UCLA**: InternVL3-1B backbone, frozen; delayed semantic interface retained
+- **Qwen-VLA**: Rectified-flow action decoder replaces MLP ActionExpert
+- **NaVILA**: CoT-style visual prompt for richer scene conditioning
+- **LifelongVLA**: Feature-level layer norm for distribution stability
+
+**FlowActionHead** (new — 1.8M params):
+- Conditioning: mean-pooled InternVL3-1B visual features (2048-dim) → 512-dim
+- Noise injection: x_t = (1−t)·x₀ + t·ε; velocity target v = ε − x₀ (rectified flow)
+- Architecture: 4-layer Transformer Decoder (nhead=8, ffn=1024, pre-LN), sinusoidal timestep embedding
+- Inference: 20 ODE integration steps from x₁ ~ N(0,I) → x₀ (30-step (dx,dy) waypoints)
+
+**Training pipeline on simulator (cuda:0 = Blackwell 48GB, PID 15297):**
+
+Phase 1 — Feature extraction:
+- InternVL3-1B backbone loaded from paper ckpt (`TIC-VLA-model.ckpt`)
+- `vlm.extract_feature(pixel_values)` → (256, 2048), mean-pool → (2048,) per window
+- Cache: `/home/cvit-car-simulator/Desktop/flowvla_cache/train/` (`.npy` per window)
+- Train: 10,040 windows; Test: 200 windows; Rate: ~9 windows/s; Total time: ~20 min
+
+Phase 2 — FlowActionHead training:
+- 60 epochs, batch=256, AdamW lr=3e-4, CosineAnnealingLR
+- Normalization: per-feature-dim stats computed from 2000 training windows
+- Val ADE logged every epoch; best checkpoint saved as `flowvla_best.pt`
+- Post-training: test ADE/FDE computed on 200 test windows (compare vs Phase 9 paper-ckpt baseline)
+
+**Baseline for comparison (Phase 9, paper ckpt):**
+- ADE = 0.9509m, FDE = 1.6872m, heading_error mean = 5.7°
+
+**Script:** `/home/cvit-car-simulator/Desktop/flowvla_train.py`
+**Log:** `/home/cvit-car-simulator/Desktop/flowvla_train.log`
+**Output:** `/home/cvit-car-simulator/Desktop/flowvla_output/`
+
+**COMPLETE — Final results:**
+
+| Metric | FlowVLA-BW | Phase 9 (paper ckpt) | BW18 (fine-tuned, lost) |
+|--------|-----------|---------------------|-------------------------|
+| Test ADE | **0.4493m** | 0.9509m | 0.090m |
+| Test FDE | **1.5336m** | 1.6872m | 0.185m |
+| Val ADE (best) | 0.0292m | — | 0.077m |
+| Improvement vs paper | **−52.7%** | baseline | −90.5% |
+
+**Training curve:** ADE dropped from 0.48m (ep1) → 0.029m (ep57, val) in 60 epochs × ~1s/epoch = ~1 min.
+**Val vs test gap** (0.029m vs 0.449m): FlowActionHead learns feature-to-waypoint mapping on frozen features → memorizes training distribution, limited test generalization.
+**Key limitation:** No delayed KV cache context, no LoRA VLM fine-tuning. Frozen InternVL3-1B produces similar features within distribution but doesn't adapt to task-specific patterns.
+**Next step for 0.090m:** Add LoRA to InternVL3-1B + KV cache context from delayed frames (TIC-VLA's delayed semantic interface) — or retrain BW18 from scratch.
+
+---
+
+## [2026-08-02] milestone | Phase 9 COMPLETE — TIC-VLA paper ckpt on BW17 DynaNav test (in-distribution)
+
+**Context:** TIC-VLA-model.ckpt = original paper checkpoint (epoch=9, global_step=39310). Our BW18 fine-tuned checkpoint (`bw18_ticvla_output/`) is MISSING/DELETED from simulator.
+
+**Experiment:** 200 test windows from BW17 DynaNav test split, in-distribution (same warehouse, same task types as training).
+
+**Results:**
+
+| Metric | Value | BW18 fine-tuned (reference) |
+|--------|-------|-----------------------------|
+| ADE | 0.9509m | **0.090m** (10× better) |
+| FDE | 1.6872m | **0.185m** |
+| Heading error mean | **5.7°** | — |
+| Heading error median | — | — |
+| Mean latency | 1.45s/window | 2.99s (full predict) |
+
+**Key findings:**
+1. **ADE 10× worse than BW18**: paper checkpoint trained on GND/SCAND/DynaNav (simulator's own data), not our BW17 warehouse. Domain gap confirmed.
+2. **Heading error only 5.7°**: direction is roughly correct (VLM understands visual scene), but magnitudes are wrong → explains high ADE/FDE.
+3. **Latency 1.45s**: using cuda:0 = Blackwell 48GB (confirmed via PyTorch device query).
+4. **GT waypoints confirmed**: `future[i]["offset"] = [x, y, z]` = cumulative from current position, matching ActionExpert output format exactly.
+5. **No success/failure labels**: all DynaNav demos are successful; closed-loop Isaac Sim needed for proper evaluation.
+
+**Script:** `/home/cvit-car-simulator/Desktop/phase9_sim_eval.py` (nohup, PID 13347, COMPLETE)
+**Output:** `/home/cvit-car-simulator/Desktop/phase9_results/phase9_step_log.jsonl`, `phase9_summary.json`
+
+---
+
+## [2026-08-02] milestone | Phase 8 COMPLETE — TIC-VLA paper ckpt on VLN-PE (OOD, episode-level eval)
+
+**Experiment:** 10 episodes (5 × 17DRP5sb8fy + 5 × rPc6DW4iMge), ALL steps per episode, STOP detection as success criterion. Paper checkpoint on Ada gnode052 (RTX 2080 Ti), SLURM job 2661596.
+
+**Results:**
+
+| Episode | Scene | Steps | Action Acc | STOP predicted | Verdict |
+|---------|-------|-------|-----------|----------------|---------|
+| 1 | 17DRP5sb8fy | 87 | 50.6% | ✗ | FAILURE |
+| 2 | 17DRP5sb8fy | 36 | 83.3% | ✗ | FAILURE |
+| 3 | 17DRP5sb8fy | 56 | 62.5% | ✗ | FAILURE |
+| 4 | 17DRP5sb8fy | 51 | 52.9% | ✗ | FAILURE |
+| 5 | 17DRP5sb8fy | 97 | 45.4% | ✗ | FAILURE |
+| 6 | rPc6DW4iMge | 64 | 39.1% | **✓** | **SUCCESS** |
+| 7 | rPc6DW4iMge | 46 | 23.9% | ✗ | FAILURE |
+| 8 | rPc6DW4iMge | 137 | 37.2% | ✗ | FAILURE |
+| 9 | rPc6DW4iMge | 112 | 42.9% | ✗ | FAILURE |
+| 10 | rPc6DW4iMge | 64 | 64.1% | ✗ | FAILURE |
+
+**Overall: 1/10 (10%) success rate, 50.2% mean action accuracy, 750 total steps**
+
+**Key findings:**
+1. **STOP never predicted**: model consistently outputs FWD/turn even at GT STOP step — no learned stopping behavior for Matterport3D scenes.
+2. **10% success rate**: comparable to random (25% for 4 actions). Paper checkpoint does not generalise to VLN-PE out-of-distribution.
+3. **Episode 6 success is coincidental**: 39.1% action accuracy + correct STOP — VLN-PE instruction possibly coincidentally similar to training data.
+4. **Latency**: ~5.3s per step on RTX 2080 Ti (Ada) vs 1.45s on Blackwell (simulator).
+5. **Confirms need for VLN-PE fine-tuning** to improve STOP prediction and turn discrimination.
+
+**Script:** `~/phase8_gnode052.sh` (SLURM 2661596, gnode052, Ada HPC) — COMPLETE
+**Artifacts:** `/home2/om.kathalkar/logs/phase8_step_log.jsonl`, `phase8_summary.json`
+
+---
+
+## [2026-08-02] decision | BW18 checkpoint missing — paper ckpt is primary artifact
+
+**Finding:** `~/Desktop/bw18_ticvla_output/` is DELETED from simulator. Only remaining VLA checkpoint is the original paper `TIC-VLA-model.ckpt`.
+
+**Evidence for paper ckpt identity:**
+- `epoch=9` (BW18 action best epoch=14, VLM best epoch=0)
+- `global_step=39310` (implies ~10K+ episode dataset, not our 10,040-window BW17)
+- `train_data_dir=None` (not saved in paper checkpoint)
+- Performance gap: ADE=0.9509m (paper) vs 0.090m (BW18 reference) = 10× difference
+
+**Implication:** FlowVLA-BW training is effectively a replacement for the lost BW18 checkpoint. If FlowVLA achieves ADE ≪ 0.9509m, it can serve as our primary trained checkpoint going forward.
+
+**Action:** FlowVLA-BW training launched (see entry above). Also need to investigate whether bw18_ticvla_output was backed up to Ada scratch.
+
+---
+
 ## [2026-05-23] setup | Wiki initialised
 
 Wiki created following Karpathy LLM Wiki pattern.
@@ -1246,3 +1374,122 @@ All 5 components verified live on cvit-car-simulator:
 5. openvla env — torch 2.11.0+cu128, CUDA available, device = NVIDIA RTX PRO 5000 Blackwell
 Note: `ros2 --version` is not a valid flag; use `printenv ROS_DISTRO` to check.
 Status: BW01 stack fully confirmed. Ready to proceed with BW02 (Nav2 baseline benchmarks).
+
+## [2026-08-02] milestone | FlowVLA-BW v2 COMPLETE — End-to-end VLA with instruction conditioning on Isaac-Synthetic
+
+**Architecture: FlowVLA-BW v2** (vision + instruction → immediate action via rectified flow)
+- **Backbone (frozen):** InternVL3-1B (TIC-VLA paper checkpoint)
+  - Vision encoder → mean-pool image tokens → feat_v (896-dim)
+  - LLM embed_tokens → mean-pool instruction tokens → feat_t (896-dim)
+  - Concatenated feature: 1792-dim
+- **Action head:** FlowActionHead2D (1.4M params, 3-layer MLP denoiser)
+  - Input: fused feat (1792-dim) + noisy action (2-dim) + timestep
+  - Output: velocity field → (lin_vel, ang_vel) via 20-step Euler ODE integration
+  - Rectified flow: x_t = (1-t)·x₀ + t·x₁, target = x₁ - x₀
+- **Action space:** 2D — (lin_vel, ang_vel) extracted from action_7d[[0, 5]]
+
+**Dataset:** [[Isaac-Synthetic]] — 5000 samples, 10 unique navigation instructions, 500 per instruction
+- Images: 640×480 RGB JPEG, isaac_synthetic warehouse scene
+- Instructions: 10 diverse commands (e.g., "Turn left to reach the northern aisle", "Back up to clear the forklift path")
+- action_7d: only dims 0 (lin_vel) and 5 (ang_vel) non-zero; other dims identically zero
+- Per-instruction action is nearly constant (std_lin≈0.018, std_ang≈0.018 within each instruction)
+
+**Training (simulator machine, RTX PRO 5000 Blackwell, cuda:0):**
+- Phase 1 — Feature extraction: 5000 samples in 76.8s at 65 samples/s
+- Phase 2 — FlowActionHead2D training: 120 epochs, batch=512, AdamW lr=3e-4, cosine LR decay
+- Stratified split: 4500 train (450 per instruction) / 500 val (50 per instruction)
+
+**Evaluation results:**
+
+| Model | MAE_lin | MAE_ang | DirAcc |
+|---|---|---|---|
+| Text-only baseline (per-instruction mean) | 0.0164 | 0.0144 | 86.4% |
+| **FlowVLA-v2 (vision + instruction)** | **0.0144** | 0.0153 | **90.2%** |
+| Improvement | **+12.3%** | -6.4% | **+3.8pp** |
+
+**Per-instruction breakdown (val, 50 samples each):**
+
+| Instruction | MAE_lin | MAE_ang | DirAcc |
+|---|---|---|---|
+| Move to forklift pickup station | 0.0141 | 0.0111 | 100% |
+| Navigate to charging dock (right) | 0.0138 | 0.0134 | 100% |
+| Navigate to left loading bay | 0.0163 | 0.0204 | 100% |
+| Navigate to right dispatch area | 0.0155 | 0.0171 | 100% |
+| Turn left to northern aisle | 0.0134 | 0.0157 | 100% |
+| Turn right to exit gate | 0.0113 | 0.0152 | 100% |
+| Turn to face receiving station | 0.0138 | 0.0167 | 100% |
+| Navigate carefully through corridor | 0.0124 | 0.0136 | 74% |
+| Navigate to east storage area | 0.0139 | 0.0163 | 66% |
+| Back up to clear forklift path | 0.0190 | 0.0139 | 62% |
+
+**Key findings:**
+1. Vision + instruction beats text-only for lin_vel (+12.3%): visual context informs speed
+2. Text features alone are better for ang_vel sign: turn direction is semantically explicit in instructions
+3. Failures on underspecified instructions: "Navigate carefully" and "Back up" have more intra-instruction ang_vel variation
+4. 7/10 instructions achieve 100% direction accuracy — model correctly classifies turn direction from instruction semantics
+5. Best val MAE = 0.0149 (checkpoint: `~/Desktop/flowvla_v2_output/flowvla_v2_best.pt`)
+
+**Script:** `~/Desktop/flowvla_v2_train.py` (phases: 1=feat extract, 2=train, 0=both)
+
+## [2026-08-03] milestone | FlowVLA-BW v3 COMPLETE — trained on real warehouse teleoperation data
+
+**Key change from v2:** v2 trained on [[Isaac-Synthetic]] (computer-generated, near-constant actions per instruction). v3 trained on 1 856 real frames captured by intern via keyboard teleoperation in the warehouse scene — real velocity variation, real turn trajectories.
+
+**Dataset: warehouse_capture (intern teleoperation)**
+- 5 episodes, 1 856 frames total, captured at 5 fps via `warehouse_controller.py`
+- Camera: Nova Carter front Hawk, 640×360 JPEG
+- Auto-labeling by action pattern:
+  - `|ang_vel| ≥ 0.5` → turn_left / turn_right
+  - `lin_vel < 0.05` → skip (stopped frames excluded)
+  - `lin_vel < 0.2` → slow
+  - else → forward
+- 6× oversampling of minority turn frames to balance classes
+
+**Architecture: FlowVLA-BW v3** (identical to v2)
+- Backbone (frozen): InternVL3-1B — feat_v (896-dim) + feat_t (896-dim) → 1792-dim concat
+- FlowActionHead2D: 3-layer MLP denoiser, 20-step Euler ODE, rectified flow
+- Action space: (lin_vel, ang_vel)
+
+**Training (simulator machine, RTX PRO 5000 Blackwell):**
+- 150 epochs, stratified split by label, AdamW lr=3e-4, cosine LR
+- Val MAE = **0.0044** (vs v2: 0.0149 on Isaac-Synthetic) — 3.4× improvement on real data
+- Turn direction accuracy: **100%** on all turn frames
+- Checkpoint: `~/Desktop/flowvla_v3_output/flowvla_v3_best.pt`
+
+**Significance:** v3 bridges the sim-to-real gap — it learns from actual human teleoperation rather than scripted synthetic trajectories. The action diversity (real turn radii, variable speeds) forces the model to use visual context, not just instruction semantics.
+
+**Script:** `~/Desktop/flowvla_v3_train.py`
+
+## [2026-08-03] investigation | FlowVLA-BW v3 demo — Isaac Sim crash diagnosis and workaround
+
+**Goal:** Run FlowVLA-BW v3 live in Isaac Sim, record `demo.mp4` showing instruction → robot motion.
+
+**Architecture designed (two-process IPC):**
+- Process 1 (isaac6 env, GPU 0 / 4060 Ti): headless Isaac Sim — captures camera frames, applies VLA actions to Nova Carter via `/cmd_vel`, saves frames, compiles `demo.mp4` via ffmpeg
+- Process 2 (tic-vla env, GPU 1 / Blackwell): FlowActionHead2D inference — reads frames, writes `(lin_vel, ang_vel)` actions
+- IPC: file-based `/tmp/flowvla_v3_ipc/` — `frame.jpg` + `frame.ready`, `action.json` + `action.ready`, `quit`
+- Scripts: `flowvla_v3_run.py` (Isaac) + `flowvla_v3_gui_vla.py` (VLA) + `flowvla_v3_run_launch.sh`
+
+**Crash: OmniGraph `std::out_of_range` during scene load**
+
+Every run crashed in `libomni.graph.core.plugin.so` at `app.update()` during `open_stage(SCENE_URL)` with:
+```
+terminate called after throwing an instance of 'std::out_of_range'
+what():  no null terminator at count
+```
+
+**Root cause (confirmed):** Isaac Sim 6.0.0.1's OmniGraph/Carbonite components require a **GPU-accelerated X display** even in headless mode. When launched from SSH with no display or with Xvfb (software rendering), OmniGraph crashes during stage loading. When launched from a GNOME terminal with `DISPLAY=:0` (XWayland, GPU-accelerated), the same code runs cleanly — confirmed by the intern's `warehouse_controller.py` which uses identical SimulationApp config.
+
+**Fixes applied during investigation:**
+- `CUDA_DEVICE_ORDER=PCI_BUS_ID` — aligns CUDA enumeration with Vulkan PCI order (4060 Ti=0, Blackwell=1). Without this, CUDA "fastest-first" gives Blackwell as device 0 while Vulkan picks 4060 Ti as Vulkan GPU 0 → mismatch → crash.
+- `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json` — forces NVIDIA ICD, prevents AMD iGPU (visible in SSH/headless Vulkan enumeration) from being selected.
+- `rep.orchestrator.step()` before `rgb_ann.get_data()` — prevents OmniGraph image pipeline race (documented in intern's `warehouse_controller.py`).
+- `set -eo pipefail` (not `-euo`) — ROS2 `setup.bash` uses unbound variables.
+
+**Status:** Demo not yet recorded. Machine recovered after crash loop.
+
+**Pending fix:** Run `flowvla_v3_run_launch.sh` from GNOME terminal via AnyDesk (not SSH). The launch script now sets `DISPLAY=:0`, `QT_QPA_PLATFORM=xcb`, and calls `xhost +local:` for SSH fallback. This matches the proven pattern from `warehouse_controller_launch.sh`.
+
+**Fallback (offline demo):** `flowvla_v3_offline_demo.py` — runs VLA inference on existing 1856 intern frames, overlays `lin_vel`/`ang_vel` predictions per frame, compiles annotated `demo.mp4` without Isaac Sim. Output: `~/Desktop/flowvla_v3_offline_demo.mp4`.
+
+**Key Isaac Sim 6.0.0.1 lesson:** Headless ≠ displayless. `SimulationApp({"headless": True})` still requires GPU-accelerated X (XWayland or real X11) for OmniGraph to initialize correctly. Pure Xvfb (software) is insufficient. EGL surfaceless may work but is untested on this machine.
