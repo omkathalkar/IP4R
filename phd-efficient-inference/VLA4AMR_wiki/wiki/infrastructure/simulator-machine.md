@@ -164,7 +164,12 @@ DeepSpeed config: `~/VLA4AMR/code/bw15_zero2.json`
 - ~~Will RTX 5000 Pro appear as GPU 1 or GPU 0 after driver install?~~ **Resolved 2026-05-26:** GPU 0 = RTX 4060 Ti, GPU 1 = RTX PRO 5000 Blackwell — matches planned assignment
 - ~~Will nvidia-driver-595-open support RTX 5000 Pro Blackwell?~~ **Resolved 2026-05-26:** Yes (but 595 NFB branch not validated — must use R570 or R580)
 - ~~ROS2 bridge Jazzy incompatibility in 4.5.0?~~ **Root cause 2026-06-13:** Python version mismatch (4.5.0=py3.10, Jazzy=py3.12). Fixed in 6.0.0 (py3.12 matches Jazzy).
-- ~~**Isaac Sim 6.0.0.1 headless from SSH crashes**~~ **Root cause 2026-08-03:** OmniGraph (`libomni.graph.core.plugin.so`) crashes with `std::out_of_range: no null terminator at count` during `open_stage()` when launched from SSH without a real X display. Headless mode still requires GPU-accelerated X (XWayland or real X11) for OmniGraph to initialize. **Fix:** Always launch from GNOME terminal with `DISPLAY=:0` (same as `warehouse_controller_launch.sh`). Required env vars: `CUDA_DEVICE_ORDER=PCI_BUS_ID` (aligns CUDA enumeration with Vulkan PCI order), `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json` (prevents AMD iGPU selection in headless Vulkan), `QT_QPA_PLATFORM=xcb`. Xvfb (software rendering) is insufficient.
+- ~~**Isaac Sim 6.0.0.1 headless from SSH crashes**~~ **Root cause (fully resolved 2026-08-04):** 5 bugs, all fixed. See log entry [2026-08-04]. Short form:
+  1. `DISPLAY=:1` not `:0` (Xorg at `:1`)
+  2. `XAUTHORITY=/run/user/1000/gdm/Xauthority` (SSH lacks X auth)
+  3. No `CUDA_VISIBLE_DEVICES` for Isaac (carb.cudainterop crashes; use `active_gpu=0` in SimulationApp instead)
+  4. Enable `isaacsim.ros2.bridge` AFTER `open_stage()`, not before (pre-wired ROS2 OmniGraph nodes crash if bridge loads during scene init)
+  5. `cv2.namedWindow` in headless mode — wrap in try/except
 
 ## Isaac Sim 6.0.0.1 — GPU / display config reference (updated 2026-08-03)
 
@@ -173,7 +178,11 @@ DeepSpeed config: `~/VLA4AMR/code/bw15_zero2.json`
 | `CUDA_DEVICE_ORDER` | `PCI_BUS_ID` | Aligns CUDA order with Vulkan/nvidia-smi (4060 Ti=0, Blackwell=1) |
 | `CUDA_VISIBLE_DEVICES` | `0` for Isaac, `1` for VLA | Isaac on 4060 Ti, VLA inference on Blackwell |
 | `VK_ICD_FILENAMES` | `/usr/share/vulkan/icd.d/nvidia_icd.json` | Force NVIDIA ICD; blocks AMD iGPU in SSH/headless Vulkan enumeration |
-| `DISPLAY` | `:0` | XWayland (GPU-accelerated) — required by OmniGraph even in headless mode |
+| `DISPLAY` | `:1` | Xorg session (GPU-accelerated) — **:1 not :0**; confirmed via `/tmp/.X11-unix/X1` |
+| `XAUTHORITY` | `/run/user/1000/gdm/Xauthority` | X auth cookie for GNOME Xorg session — SSH sessions don't inherit this |
+| `DBUS_SESSION_BUS_ADDRESS` | `unix:path=/run/user/1000/bus` | ROS2 bridge needs DBUS for daemon comms |
+| `XDG_RUNTIME_DIR` | `/run/user/1000` | Required by ROS2 bridge extension |
+| `XDG_SESSION_TYPE` | `x11` | Tells GNOME stack this is X11 session |
 | `QT_QPA_PLATFORM` | `xcb` | Force Qt to X11 over Wayland |
 | SimulationApp `active_gpu` | `0` | Selects 4060 Ti as Vulkan renderer |
 | SimulationApp `headless` | `True` | No Kit window — safe from GNOME terminal |

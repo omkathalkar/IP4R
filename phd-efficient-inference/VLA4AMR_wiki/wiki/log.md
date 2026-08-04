@@ -1493,3 +1493,36 @@ what():  no null terminator at count
 **Fallback (offline demo):** `flowvla_v3_offline_demo.py` — runs VLA inference on existing 1856 intern frames, overlays `lin_vel`/`ang_vel` predictions per frame, compiles annotated `demo.mp4` without Isaac Sim. Output: `~/Desktop/flowvla_v3_offline_demo.mp4`.
 
 **Key Isaac Sim 6.0.0.1 lesson:** Headless ≠ displayless. `SimulationApp({"headless": True})` still requires GPU-accelerated X (XWayland or real X11) for OmniGraph to initialize correctly. Pure Xvfb (software) is insufficient. EGL surfaceless may work but is untested on this machine.
+
+---
+
+## [2026-08-04] milestone | FlowVLA-BW v3 LIVE DEMO COMPLETE — full pipeline running from SSH
+
+**Result:** `demo.mp4` recorded. 300 steps, 25 frames, real Isaac Sim warehouse footage.
+
+**Root causes resolved (all 5 bugs fixed):**
+
+1. **`DISPLAY=:0` wrong** — Xorg runs at `:1` not `:0`. `DISPLAY=:1` required. (`/tmp/.X11-unix/X1` confirmed.)
+2. **Missing `XAUTHORITY`** — SSH sessions don't inherit X auth cookie. `XAUTHORITY=/run/user/1000/gdm/Xauthority` required for the GNOME Xorg session at `:1`.
+3. **`CUDA_VISIBLE_DEVICES=0` for Isaac** — carb.cudainterop crashes when CUDA_VISIBLE_DEVICES is set. Must NOT be exported for Isaac. GPU selection via `active_gpu=0` in `SimulationApp({})` is sufficient.
+4. **ROS2 bridge enabled BEFORE `open_stage()`** — `carter_warehouse_navigation.usd` has pre-wired ROS2 OmniGraph action graphs. If `isaacsim.ros2.bridge` extension is active when the scene loads, OmniGraph crashes with `std::out_of_range: no null terminator at count`. **Fix:** call `open_stage()` first, wait for scene to load, then `set_extension_enabled_immediate("isaacsim.ros2.bridge", True)`.
+5. **VLA `cv2.namedWindow` headless crash** — tic-vla env has headless OpenCV (no GTK). Fixed by wrapping in try/except with `_gui = False` fallback.
+
+**Diagnosis sequence (how the root cause was isolated):**
+- Minimal test `isaac_s3_test.py` (no ROS2 bridge) → **PASS** — confirmed scene loads fine without bridge
+- Full script → crash — confirmed ROS2 bridge init before `open_stage()` is the trigger
+- Moving bridge enable to after scene load → **PASS** — demo ran all 300 steps
+
+**Working command (from SSH):**
+```bash
+bash ~/Desktop/flowvla_v3_run_launch.sh "Turn left at the shelf" 300
+```
+
+**Demo output:** `~/Desktop/flowvla_v3_demo/20260804_150623/demo.mp4` (173 KB, 25 frames at 5fps)
+
+**VLA predictions:** `lin≈+0.33 m/s, ang≈−0.04 rad/s` (consistent forward motion, slight rightward drift — plausible for the "turn left" command in the initial forward phase)
+
+**Scripts on Desktop (all updated and working):**
+- `flowvla_v3_run_launch.sh` — master launcher (DISPLAY=:1, XAUTHORITY, DBUS, no CUDA_VISIBLE_DEVICES for Isaac)
+- `flowvla_v3_run.py` — Isaac Sim script (bridge enabled AFTER scene load)
+- `flowvla_v3_gui_vla.py` — VLA inference (headless-safe cv2)
