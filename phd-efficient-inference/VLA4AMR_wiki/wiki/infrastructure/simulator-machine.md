@@ -170,13 +170,14 @@ DeepSpeed config: `~/VLA4AMR/code/bw15_zero2.json`
   3. No `CUDA_VISIBLE_DEVICES` for Isaac (carb.cudainterop crashes; use `active_gpu=0` in SimulationApp instead)
   4. Enable `isaacsim.ros2.bridge` AFTER `open_stage()`, not before (pre-wired ROS2 OmniGraph nodes crash if bridge loads during scene init)
   5. `cv2.namedWindow` in headless mode — wrap in try/except
+- **cmd_vel not reaching robot physics (open 2026-08-04):** Enabling the ROS2 bridge after scene load (Bug #4 fix) disconnects the pre-wired `/cmd_vel` OmniGraph subscriber — it was created during `open_stage()` before the bridge was active and never got a bridge handle. Robot stationary in FlowVLA demo despite correct VLA predictions. Two fixes: (A) programmatically build a new OmniGraph cmd_vel → differential drive graph after enabling bridge, or (B) load environment USD and Nova_Carter_ROS.usd separately so robot OmniGraph initializes fresh with bridge already active.
 
 ## Isaac Sim 6.0.0.1 — GPU / display config reference (updated 2026-08-03)
 
 | Variable | Value | Why |
 |---|---|---|
 | `CUDA_DEVICE_ORDER` | `PCI_BUS_ID` | Aligns CUDA order with Vulkan/nvidia-smi (4060 Ti=0, Blackwell=1) |
-| `CUDA_VISIBLE_DEVICES` | `0` for Isaac, `1` for VLA | Isaac on 4060 Ti, VLA inference on Blackwell |
+| `CUDA_VISIBLE_DEVICES` | **not set** for Isaac, `1` for VLA | Isaac GPU selected via `active_gpu=0` in SimulationApp — setting CUDA_VISIBLE_DEVICES for Isaac causes carb.cudainterop crash |
 | `VK_ICD_FILENAMES` | `/usr/share/vulkan/icd.d/nvidia_icd.json` | Force NVIDIA ICD; blocks AMD iGPU in SSH/headless Vulkan enumeration |
 | `DISPLAY` | `:1` | Xorg session (GPU-accelerated) — **:1 not :0**; confirmed via `/tmp/.X11-unix/X1` |
 | `XAUTHORITY` | `/run/user/1000/gdm/Xauthority` | X auth cookie for GNOME Xorg session — SSH sessions don't inherit this |

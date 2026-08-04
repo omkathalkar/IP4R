@@ -2,7 +2,7 @@
 
 **Type:** overview
 **Status:** active
-**Last updated:** 2026-08-03 (FlowVLA-BW v3 trained; demo pending GNOME terminal run)
+**Last updated:** 2026-08-04 (FlowVLA-BW v3 live demo complete; dataset analysis done; cmd_vel bug open)
 **Related:** [[C1-AdaCoT]], [[C2-MidLevelActionHead]], [[C3-ConfidenceGatedHandoff]], [[IsaacSim]], [[NovaCarter]], [[simulator-machine]], [[Nav-AMR-WH]], [[Isaac-Synthetic]]
 
 ## Summary
@@ -57,6 +57,9 @@ VLA4AMR applies Vision-Language-Action models to Autonomous Mobile Robot navigat
 | Phase 8: TIC-VLA paper ckpt on VLN-PE (Ada HPC) | ✅ Done (1/10 success, 50.2% accuracy — confirms OOD gap) |
 | FlowVLA-BW v1 (vision-only, BW17 dataset, 30-step waypoints) | ✅ Done (2026-08-01 — ADE=0.0292m, 96.9% improvement over paper ckpt baseline 0.9509m) |
 | FlowVLA-BW v2 (vision + instruction, Isaac-Synthetic, immediate action) | ✅ Done (2026-08-02 — DirAcc=90.2%, MAE_lin=0.0144, 7/10 instructions at 100% DirAcc) |
+| FlowVLA-BW v3 (real warehouse teleoperation data) | ✅ Done (2026-08-03 — 1856 frames, val MAE=0.0044, turns 100% DirAcc) |
+| FlowVLA-BW v3 live demo (Isaac Sim, SSH) | ✅ Done (2026-08-04 — 300 steps, 25 frames, `demo.mp4` 173KB; robot stationary — cmd_vel bug open) |
+| FlowVLA-BW v3 dataset analysis | ✅ Done (2026-08-04 — 5 structural problems identified; BW20 collection protocol defined) |
 
 ## FlowVLA-BW v2 Results (2026-08-02)
 
@@ -267,6 +270,8 @@ Fine-tuned OpenVLA-7B (LoRA rank=32) evaluated on 300 val samples from bw05_data
 - ~~**BW11/BW12: Phase dependency**~~ **Resolved BW12:** BW12 eliminates Phase: token. Model infers turning from vision + rolling memory. Turning ang MAE=0.0003–0.0028 without Phase:.
 - ~~**BW12 closed-loop failure (F3)**~~ **Root cause resolved 2026-07-01:** ang=0.0000 throughout live demo despite offline ang MAE=0.0003. Four causes: imitation≠decision, mode collapse (~80% straight frames), memory self-locking loop, no recovery data. Fix: BW13 (action chunking N=4, multi-frame H=3, turn reweight 3×, always-summary). See [[decision-bw13-correctnav]].
 - ~~**BW13/BW14 priorities**~~ **Superseded by TIC-VLA track (BW16–BW19):** TIC-VLA (InternVL3-1B + ActionExpert) adopted as primary backbone over Qwen2.5-VL-7B. BW17 DynaNav dataset (9 tasks) and BW18 closed-loop demo complete. FlowVLA-BW rectified-flow action head trained on both BW17 waypoints (v1, ADE=0.0292m) and Isaac-Synthetic instructions (v2, DirAcc=90.2%).
-- ~~**BW19: FlowVLA-BW v3 training on real data**~~ **Resolved 2026-08-03:** v3 trained on 1856 real teleoperation frames (intern `warehouse_capture`). Val MAE=0.0044 (3.4× over v2). Turns 100% DirAcc. Checkpoint: `~/Desktop/flowvla_v3_output/flowvla_v3_best.pt`. Script: `~/Desktop/flowvla_v3_train.py`.
-- **Isaac Sim live demo (pending):** Isaac Sim 6.0.0.1 OmniGraph crashes from SSH without GPU-accelerated X — headless mode still needs XWayland (DISPLAY=:0). Fix: run `flowvla_v3_run_launch.sh` from GNOME terminal via AnyDesk. Fallback: `flowvla_v3_offline_demo.py` (VLA predictions overlaid on existing captured frames, no Isaac Sim required).
-- **Next priorities (BW20+):** (1) Record FlowVLA-BW v3 live demo from GNOME terminal. (2) LoRA fine-tune InternVL3-1B VLM jointly with FlowActionHead. (3) C3 confidence-gated handoff + C6 evaluation protocol. (4) Full ICRA paper draft — deadline Sep 15, 2026.
+- ~~**BW19: FlowVLA-BW v3 training on real data**~~ **Resolved 2026-08-03:** v3 trained on 1856 real teleoperation frames (intern `warehouse_capture`). Val MAE=0.0044 (3.4× over v2). Turns 100% DirAcc. Checkpoint: `~/Desktop/flowvla_v3_output/flowvla_v3_best.pt`.
+- ~~**Isaac Sim live demo (SSH crash)**~~ **Resolved 2026-08-04:** 5 bugs fixed (DISPLAY=:1, XAUTHORITY, no CUDA_VISIBLE_DEVICES for Isaac, ROS2 bridge after open_stage(), headless cv2). Pipeline runs end-to-end from SSH. Demo: `~/Desktop/flowvla_v3_demo/20260804_150623/demo.mp4` (173 KB). Local copy: `~/Downloads/FlowVLA_v3_demo.mp4`.
+- **cmd_vel not reaching robot physics (open):** Enabling ROS2 bridge after `open_stage()` disconnects the pre-wired `/cmd_vel` OmniGraph subscriber. Robot was stationary in demo — VLA predicted correctly but physics got no velocity command. Fix: programmatic OmniGraph cmd_vel graph (Option A) or load robot USD separately after scene (Option B). See log [2026-08-04] investigation.
+- **BW20 dataset collection (open):** v3 dataset has 5 structural flaws (3 synthetic instructions, drift corrections mislabeled as turns, no visual-trigger grounding, 64% forward dominance, single start position). Protocol defined — target ≥150 episodes, ≥2000 frames, balanced, with operator-typed per-segment instructions. See log [2026-08-04] investigation for full spec.
+- **Next priorities (BW20+):** (1) Fix cmd_vel physics link (Option A/B above) and re-run demo with robot actually moving. (2) Collect new dataset per BW20 protocol. (3) Retrain FlowVLA-BW v4 on new data — expect instruction-conditioned turning. (4) C3 confidence-gated handoff + C6 evaluation protocol. (5) Full ICRA paper draft — deadline Sep 15, 2026.

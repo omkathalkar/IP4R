@@ -1526,3 +1526,80 @@ bash ~/Desktop/flowvla_v3_run_launch.sh "Turn left at the shelf" 300
 - `flowvla_v3_run_launch.sh` — master launcher (DISPLAY=:1, XAUTHORITY, DBUS, no CUDA_VISIBLE_DEVICES for Isaac)
 - `flowvla_v3_run.py` — Isaac Sim script (bridge enabled AFTER scene load)
 - `flowvla_v3_gui_vla.py` — VLA inference (headless-safe cv2)
+
+---
+
+## [2026-08-04] investigation | FlowVLA-BW v3 demo — robot stationary, cmd_vel not reaching physics
+
+**Symptom:** All 25 captured frames are visually identical. Robot did not move despite VLA predicting `lin≈+0.33 m/s`. Actions were logged correctly to `actions.jsonl`.
+
+**Root cause:** Enabling `isaacsim.ros2.bridge` AFTER `open_stage()` (fix for Bug #4 above) has a side effect: the pre-wired `/cmd_vel` OmniGraph action graph subscriber in `carter_warehouse_navigation.usd` was created during scene load, before the bridge extension was active. It never got a bridge handle and therefore silently dropped all incoming cmd_vel messages. The ROS2 node published correctly; the bridge received the messages; but the physics joint controller was never driven.
+
+**Two valid fixes for next demo run:**
+
+**Option A — Programmatic OmniGraph cmd_vel (preferred):**
+After enabling the bridge post-load, do NOT rely on the scene's pre-wired subscriber. Instead, programmatically create a new OmniGraph action graph using `omni.graph.core` that subscribes to `/cmd_vel` and drives the differential drive controller directly. This is the approach the NVIDIA tutorials use when loading robot + scene separately.
+
+**Option B — Load robot separately:**
+Load `carter_warehouse_navigation.usd` (environment geometry only, no robot) + spawn `Nova_Carter_ROS.usd` afterwards. The robot's OmniGraph nodes initialize fresh with the bridge already enabled → cmd_vel subscriber works. Scene file used without Nova Carter: replace `carter_warehouse_navigation.usd` with the plain warehouse environment USD.
+
+**Status:** Open — next demo run must implement Option A or B.
+
+---
+
+## [2026-08-04] investigation | FlowVLA-BW v3 dataset analysis — 5 structural problems
+
+**Context:** Post-demo analysis of why VLA predicts `lin≈+0.33, ang≈−0.04` regardless of instruction ("Turn left at the shelf").
+
+**Actual v3 training distribution (from `meta_v3.json`):**
+
+| Instruction string | Samples | % |
+|---|---|---|
+| "Drive forward through the warehouse aisle" | 1699 | 64% |
+| "Turn right at the intersection" | 726 | 27% |
+| "Turn left to navigate the warehouse corridor" | 216 | 8% |
+| **Total** | **2641** | |
+
+Raw episode stats (5 episodes, 1856 frames before oversampling):
+
+| Episode | Frames | ang_mean | fwd | left | right |
+|---|---|---|---|---|---|
+| 20260803_151911 | 276 | −0.033 | 254 | 5 | 17 |
+| 20260803_152930 | 304 | −0.020 | 268 | 14 | 22 |
+| 20260803_153947 | 158 | −0.100 | 129 | 4 | 25 |
+| 20260803_160926 | 393 | −0.042 | 367 | 2 | 24 |
+| 20260803_161925 | 725 | −0.023 | 681 | 11 | 33 |
+
+**5 structural problems:**
+
+1. **Only 3 instruction strings, all synthetic.** Instructions were auto-assigned post-hoc based on `|ang| ≥ 0.5` threshold — not spoken or typed by the operator during collection. The model learns a 3-class lookup, not natural language → action. The inference instruction "Turn left at the shelf" was never in the training vocabulary; the model defaulted to the 64% majority class (forward).
+
+2. **Instructions not grounded in visual context.** Turn frames (where `|ang| ≥ 0.5`) occur at arbitrary points in the trajectory — mid-aisle drift corrections, not intentional navigation maneuvers. There is no training example showing "approaching a visual landmark + `turn left` instruction → ang > 0.5". The visual trigger for turning and the instruction label are decoupled.
+
+3. **Turns are drift corrections, not deliberate navigation.** Left-turn raw counts: 5 + 14 + 4 + 2 + 11 = 36 frames across all 5 episodes. These are micro-corrections (ang spike for 1–2 frames) while going generally straight. A real 90° warehouse turn is lin≈0.1, ang≈0.8–1.0 for 10–15 frames. No such maneuvers exist in the data.
+
+4. **Extreme class imbalance even after 6× oversampling.** Before oversampling: 36 left-turn frames, ~90 right-turn, ~1730 forward. After 6×: 216 left, 726 right, 1699 forward. Forward still dominates at 64%. The model correctly learns "when uncertain, go straight" — which is the empirically optimal policy for this dataset.
+
+5. **Zero episode diversity.** Same warehouse, same intern, same start position, same approximate trajectory. VLM features for all episodes collapse to the same distribution. No generalization signal.
+
+**Improvements for next data collection (BW20 protocol):**
+
+| Issue | Fix |
+|---|---|
+| Synthetic instruction labels | Operator types/speaks instruction BEFORE each maneuver; logged to per-segment `instruction.txt` |
+| Only 3 instruction strings | 10–15 natural phrasings per behavior (forward, left turn, right turn, slow, stop) |
+| Drift corrections labeled as turns | Intentional 90° turns only: lin≈0.1, ang≈0.8–1.0, 10+ frames; reject frames with `|ang| < 0.5` during a "turn" episode |
+| No visual trigger grounding | Collect "turn" episodes where the landmark (shelf end, intersection) is visible 3–5s BEFORE the turn |
+| Single start position | ≥3 distinct starting positions per trajectory type |
+| 5 episodes total | ≥30 episodes per maneuver type (forward, left, right), ≥150 episodes total |
+| Auto-label post-hoc | Real-time label logging: operator presses key at maneuver start → instruction written to JSONL with frame timestamp |
+
+**Concrete session plan for next collection sprint:**
+1. **20 episodes:** "Drive straight through the aisle" — start at A, drive 15m, stop. Instruction constant.
+2. **20 episodes:** "Turn left at the shelf" — start at B (5m from shelf), approach, turn left 90°. Vary: "go left", "turn left", "take a left", "navigate left past the rack".
+3. **20 episodes:** "Turn right at the intersection" — symmetric.
+4. **10 episodes:** "Slow down and stop" — start moving, decelerate, stop.
+5. Run all from Isaac Sim (`warehouse_controller.py` flow) to get clean synchronized (image, action) at 5Hz, no keyboard lag.
+6. Target: ≥500 frames per class, ≥2000 total, balanced 50/25/25 (fwd/left/right).
+
+**Expected model improvement with new data:** With 500 clean left-turn frames that are visually grounded (landmark visible + instruction = "turn left" → ang > 0.5), the FlowActionHead2D should generalize to "Turn left at the shelf" at inference.
