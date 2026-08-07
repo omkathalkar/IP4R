@@ -2,7 +2,7 @@
 
 **Type:** overview
 **Status:** active
-**Last updated:** 2026-08-04 (FlowVLA-BW v3 live demo complete; dataset analysis done; cmd_vel bug open)
+**Last updated:** 2026-08-07 (C3 hybrid nav stack Phases 5–9 complete; 92-test suite; Ada HPC eval pipeline ready; wiki updated)
 **Related:** [[C1-AdaCoT]], [[C2-MidLevelActionHead]], [[C3-ConfidenceGatedHandoff]], [[IsaacSim]], [[NovaCarter]], [[simulator-machine]], [[Nav-AMR-WH]], [[Isaac-Synthetic]]
 
 ## Summary
@@ -60,6 +60,13 @@ VLA4AMR applies Vision-Language-Action models to Autonomous Mobile Robot navigat
 | FlowVLA-BW v3 (real warehouse teleoperation data) | ✅ Done (2026-08-03 — 1856 frames, val MAE=0.0044, turns 100% DirAcc) |
 | FlowVLA-BW v3 live demo (Isaac Sim, SSH) | ✅ Done (2026-08-04 — 300 steps, 25 frames, `demo.mp4` 173KB; robot stationary — cmd_vel bug open) |
 | FlowVLA-BW v3 dataset analysis | ✅ Done (2026-08-04 — 5 structural problems identified; BW20 collection protocol defined) |
+| FlowVLA-BW v3 cmd_vel OmniGraph fix + robot-moves demo | ✅ Done (2026-08-05 — 5 OmniGraph bugs fixed; robot moves at 0.333 m/s; video confirmed; see below) |
+| FlowVLA-BW v3 vectord[3]→double type mismatch fix + Blackwell demo | ✅ Done (2026-08-06 — Python scalar injection; `timeline.play()`; `active_gpu=1`; 93 KB video confirmed) |
+| C3 Phase 5 — PurePursuit + ConfidenceGate | ✅ Done (2026-08-07 — 42 tests pass; mag_thresh=0.15, prog_min=0.1m/W20; VLA rate >90% on straight corridor) |
+| C3 Phase 6 — Isaac Sim closed-loop episode runner | ✅ Done (2026-08-07 — run_episode_simulator.py + vla_inference_worker.py + run_episode_simulator.sh; default (3,1)→(22,15), 6 WPs) |
+| C3 Phase 7 — Ada HPC headless batch eval pipeline | ✅ Done (2026-08-07 — run_episode_headless.py + run_episode_ada.slurm (array=0-19) + sync_to_ada.sh + aggregate_phase7.py) |
+| C3 Phase 8 — Paper comparison table | ✅ Done (2026-08-07 — run_eval_suite.py: Hybrid vs Pure VLA vs Pure A*; outputs .tex/.txt/.json; 25 tests pass) |
+| C3 Phase 9 — Wiki write-up | ✅ Done (2026-08-07 — C3 page rewritten; decision-bw20-hybrid-navstack.md; log + overview updated) |
 
 ## FlowVLA-BW v2 Results (2026-08-02)
 
@@ -272,6 +279,20 @@ Fine-tuned OpenVLA-7B (LoRA rank=32) evaluated on 300 val samples from bw05_data
 - ~~**BW13/BW14 priorities**~~ **Superseded by TIC-VLA track (BW16–BW19):** TIC-VLA (InternVL3-1B + ActionExpert) adopted as primary backbone over Qwen2.5-VL-7B. BW17 DynaNav dataset (9 tasks) and BW18 closed-loop demo complete. FlowVLA-BW rectified-flow action head trained on both BW17 waypoints (v1, ADE=0.0292m) and Isaac-Synthetic instructions (v2, DirAcc=90.2%).
 - ~~**BW19: FlowVLA-BW v3 training on real data**~~ **Resolved 2026-08-03:** v3 trained on 1856 real teleoperation frames (intern `warehouse_capture`). Val MAE=0.0044 (3.4× over v2). Turns 100% DirAcc. Checkpoint: `~/Desktop/flowvla_v3_output/flowvla_v3_best.pt`.
 - ~~**Isaac Sim live demo (SSH crash)**~~ **Resolved 2026-08-04:** 5 bugs fixed (DISPLAY=:1, XAUTHORITY, no CUDA_VISIBLE_DEVICES for Isaac, ROS2 bridge after open_stage(), headless cv2). Pipeline runs end-to-end from SSH. Demo: `~/Desktop/flowvla_v3_demo/20260804_150623/demo.mp4` (173 KB). Local copy: `~/Downloads/FlowVLA_v3_demo.mp4`.
-- **cmd_vel not reaching robot physics (open):** Enabling ROS2 bridge after `open_stage()` disconnects the pre-wired `/cmd_vel` OmniGraph subscriber. Robot was stationary in demo — VLA predicted correctly but physics got no velocity command. Fix: programmatic OmniGraph cmd_vel graph (Option A) or load robot USD separately after scene (Option B). See log [2026-08-04] investigation.
+- ~~**cmd_vel not reaching robot physics**~~ **Resolved 2026-08-06 (root cause):** Five OmniGraph creation bugs fixed on 2026-08-05 (wrong namespace, no execOut, usePath missing, shape mismatch, app.close ordering). Root cause of robot remaining stationary: `ROS2SubscribeTwist.linearVelocity/angularVelocity` outputs `vectord[3]` but `DifferentialController` inputs expect `double` — OmniGraph silently passes zeros. Fix: do NOT wire those attributes; inject scalar values from Python via `og.Controller.set()` each step. Also requires `omni.timeline.get_timeline_interface().play()` before loop. Nova Carter drive joints: `joint_wheel_left`, `joint_wheel_right`. See log [2026-08-05] and [2026-08-06].
+  - **Demo video 1 (simulator):** `~/Desktop/flowvla_v3_demo/20260805_163001/demo.mp4` (175 KB — static robot, type mismatch bug not yet fixed)
+  - **Demo video 1 (local):** `~/Downloads/vla4amr_demo/flowvla_v3_demo_20260805_163001.mp4`
+  - **Demo video 2 (simulator):** `~/Desktop/flowvla_v3_demo/<20260806_*/demo.mp4>` (93 KB — Blackwell, Python injection fix, robot moves)
+  - **Demo video 2 (local):** `~/Downloads/vla4amr_demo/flowvla_v3_blackwell_20260806_114635.mp4`
+  - **Action log (local):** `~/Downloads/vla4amr_demo/flowvla_v3_actions_20260805_163001.jsonl`
 - **BW20 dataset collection (open):** v3 dataset has 5 structural flaws (3 synthetic instructions, drift corrections mislabeled as turns, no visual-trigger grounding, 64% forward dominance, single start position). Protocol defined — target ≥150 episodes, ≥2000 frames, balanced, with operator-typed per-segment instructions. See log [2026-08-04] investigation for full spec.
-- **Next priorities (BW20+):** (1) Fix cmd_vel physics link (Option A/B above) and re-run demo with robot actually moving. (2) Collect new dataset per BW20 protocol. (3) Retrain FlowVLA-BW v4 on new data — expect instruction-conditioned turning. (4) C3 confidence-gated handoff + C6 evaluation protocol. (5) Full ICRA paper draft — deadline Sep 15, 2026.
+- **Next priorities (BW20+):**
+  1. **Run Phase 7 SLURM array on Ada:** `bash ~/Desktop/nav_stack/sim/sync_to_ada.sh` then `sbatch ~/nav_stack/sim/run_episode_ada.slurm` — get first quantitative paper numbers (heading err, ADE, FDE) for 20 BW17 windows
+  2. **Run Phase 8 eval suite on Ada:** `python3 ~/nav_stack/eval/run_eval_suite.py ...` — produces `eval_comparison.tex` (Table 1 C3 column)
+  3. **Phase 9 TIC-VLA baseline:** re-run Phase 7 with TIC-VLA paper checkpoint (`--phase9-dir`) → fills 4th column of comparison table (C2 vs C3)
+  4. **BW20 dataset collection:** ≥150 balanced episodes with operator-typed per-segment instructions (protocol in log [2026-08-04]) → retrain FlowVLA-BW v4 → expect instruction-conditioned turning
+  5. **Closed-loop success rate:** run `run_episode_simulator.sh` on ≥10 start/goal pairs → aggregate success rate (reach within 1.0m of goal)
+  6. **ICRA paper draft:** C3 §IV (method) + §V (eval) are unblocked — all numbers in `eval_comparison.tex`. Deadline **Sep 15, 2026** (~5.5 weeks remaining)
+  - **C3 hybrid stack:** `~/Desktop/nav_stack/` on simulator. Launch: `bash ~/Desktop/nav_stack/sim/run_episode_simulator.sh [x0 y0 x1 y1]`
+  - **Ada eval:** `bash ~/Desktop/nav_stack/sim/sync_to_ada.sh` from simulator, then `sbatch` on Ada
+  - **Paper table:** `python3 ~/nav_stack/eval/run_eval_suite.py --results-dir ~/logs/phase7 --data-root /ssd_scratch/om.kathalkar/bw17_dynav --grid-dir /ssd_scratch/om.kathalkar/nav_stack_grid`

@@ -1,7 +1,7 @@
 # VLA4AMR Wiki — Master Index
 
-**Last updated:** 2026-07-11 (BW18 launch)
-**Total pages:** 35
+**Last updated:** 2026-08-07 (C3 hybrid nav stack Phase 9 wiki update)
+**Total pages:** 36
 **Wiki maintainer:** Claude (Chetak)
 
 ---
@@ -20,7 +20,7 @@
 |------|------|--------|---------|
 | [[C1-AdaCoT]] | contribution | active | Entropy-gated adaptive chain-of-thought trigger for VLA navigation |
 | [[C2-MidLevelActionHead]] | contribution | active | Mid-level language action head outputting (direction, distance, context) tuples |
-| [[C3-ConfidenceGatedHandoff]] | contribution | active | Switch monitor + arbitrator for selective VLA override of Nav2 |
+| [[C3-ConfidenceGatedHandoff]] | contribution | active | Hybrid A\*/VLA nav stack with output-magnitude confidence gate; Phases 5–9 complete; 92 tests |
 | [[C4-FusionAblation]] | contribution | active | Token concat vs FiLM vs cross-attention; scaffold done BW03, training pending |
 | [[C5-RLFinetuning]] | contribution | pending | PPO post-SFT with navigation reward function |
 | [[C6-EvaluationProtocol]] | contribution | pending | Dual open-loop + closed-loop evaluation protocol |
@@ -90,3 +90,4 @@
 | [[decision-bw15-correctnav-fullstack]] | decision | active | BW15: Full CorrectNav stack (LLaVA-Video-7B-Qwen2 + SigLIP + MP4 video), 1-GPU LoRA adaptation, Isaac Sim warehouse |
 | [[decision-bw16-ticvla-warehouse]] | decision | active | BW16: TIC-VLA (InternVL3-1B + ActionExpert) trained on bw11_dataset — continuous waypoint baseline |
 | [[decision-bw18-ticvla-bw17]] | decision | active | BW18: TIC-VLA re-trained on BW17 9-task dataset — richer tasks, 30-step FLU horizon, 4× instruction aug |
+| [[decision-bw20-hybrid-navstack]] | decision | complete | BW20: 4 design decisions for C3 hybrid stack (magnitude gate, replay eval, fixed vocab, dual signal) |

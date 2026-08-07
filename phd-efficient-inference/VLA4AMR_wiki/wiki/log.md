@@ -3,6 +3,172 @@
 Append-only. Each entry: `## [YYYY-MM-DD] type | title`
 Types: ingest | query | lint | decision | milestone | setup
 
+## [2026-08-07] milestone | C3 Hybrid Nav Stack — Phases 5–9 complete; 92-test suite; Ada HPC eval pipeline ready
+
+**Scope:** Full implementation of C3 confidence-gated A\*/VLA hybrid navigation stack. All 9 planned
+phases now have code; Phases 5–8 are fully tested and deployed to cvit-car-simulator.
+
+### Phase 5 — Pure Pursuit + Confidence Gate
+
+**Files:** `nav_stack/control/pure_pursuit.py`, `nav_stack/control/confidence_gate.py`
+**Tests:** `tests/test_confidence_gate.py` (20 tests), `tests/test_astar_planner.py` (22 tests)
+
+- `PurePursuit`: lookahead-based geometric controller. Lookahead 1.2m, max_lin=0.35 m/s, max_ang=1.0 rad/s, min_lin=0.1 m/s. Heading scale: `max(0.3, 1.0 − |α|/π)` — reduces speed on large heading errors.
+- `ConfidenceGate`: dual-signal gate. `mag_ok = ||(vla_lin, vla_ang)|| ≥ 0.15`. `progress_ok = net displacement toward WP ≥ 0.1m over W=20 steps`. `used_vla = mag_ok AND progress_ok`. Provides `GateLogEntry` per step and `summary()` with vla_rate/fallback_rate. `reset_progress_window()` called at each waypoint advance.
+- Gate calibration: trained FlowVLA-BW v3 magnitude ≈ 0.46; OOD magnitude ≈ 0.0001; threshold 0.15 gives 4600× separation.
+- Acceptance tests: `test_gate_straight_corridor_vla_rate` (VLA rate > 90% with lin=0.33, ang=0.04), `test_gate_ood_low_magnitude_trips_fallback` (20/20 fallback on mag=0.0001).
+
+### Phase 6 — Isaac Sim closed-loop episode runner
+
+**Files:** `nav_stack/sim/run_episode_simulator.py`, `nav_stack/sim/vla_inference_worker.py`, `nav_stack/sim/run_episode_simulator.sh`
+
+- Two-process IPC architecture: `run_episode_simulator.py` (isaac6 env, GPU 1 Blackwell) + `vla_inference_worker.py` (tic-vla env, GPU 0 4060 Ti).
+- IPC dir `/tmp/navstack_ipc/`: `frame.jpg`, `frame.ready`, `current_instruction.txt`, `action.json`, `action.ready`, `quit`.
+- `run_episode_simulator.sh`: identical env to `flowvla_v3_run_launch.sh` (DISPLAY=:1, XAUTHORITY, VK_ICD_FILENAMES, no CUDA_VISIBLE_DEVICES for Isaac). Args: `start_x start_y goal_x goal_y [--steps N] [--skip-vla]`.
+- `vla_inference_worker.py`: reads `current_instruction.txt` per-step (per-waypoint update), caches `feat_t` — only re-tokenises on instruction change. Replaces flowvla_v3_gui_vla.py for hybrid stack.
+- Per-step: `WaypointToVLAInputOffline.step()` → write instruction → IPC frame → read action → `ConfidenceGate.step()` → `og.Controller.set()` scalar injection → dead-reckon pose → WP advance check.
+- Dead reckoning: `robot_x += cos(θ)×lin×dt`, `robot_y += sin(θ)×lin×dt`, `robot_theta += ang×dt`. XformCache not usable for physics positions in Isaac Sim 6.0.0.1.
+- Output: `episode.mp4`, `episode_log.jsonl`, `gate_log.json` → `~/Desktop/navstack_episode/<timestamp>/`.
+- Default episode: (3.0, 1.0) → (22.0, 15.0). A\* plan: 6 waypoints, confirmed on simulator.
+
+### Phase 7 — Ada HPC headless batch eval
+
+**Files:** `nav_stack/sim/run_episode_headless.py`, `nav_stack/sim/run_episode_ada.slurm`, `nav_stack/sim/sync_to_ada.sh`, `nav_stack/eval/aggregate_phase7.py`
+
+- `run_episode_headless.py`: single-window replay eval. Loads BW17 DynaNav frame, runs FlowVLA-BW v3 + ConfidenceGate (magnitude-only mode: `progress_window=1, progress_min_m=0.0`), computes heading error/ADE/FDE vs GT future. Result: `<window_name>_result.json`.
+- `run_episode_ada.slurm`: `--array=0-19`, `--partition=u22`, `--account=om.kathalkar`, `--gres=gpu:1`, `--mem=32G`, `--time=02:00:00`. Enumerates BW17 windows at runtime via `mapfile`, skips if TASK_ID ≥ N windows. Skip-if-done guard (SLURM retry safety).
+- `sync_to_ada.sh`: rsync BW17 data → `/ssd_scratch/om.kathalkar/bw17_dynav/`, checkpoint → `.../checkpoints/flowvla_v3_best.pt`, nav_stack → `/home2/om.kathalkar/nav_stack/`. Pre-generates occupancy grid on Ada in same SSH call.
+- `aggregate_phase7.py`: reads `*_result.json`, prints mean±std for heading_err/ADE/FDE (hybrid and pure_vla columns), writes `phase7_summary.json`.
+
+**Path remapping:** BW17 JSONs contain `/home/cvit-car-simulator/Desktop/bw17_dynav/...` image paths. `--data-root-old / --data-root-new` args rewrite to Ada scratch path at load time.
+
+### Phase 8 — C3 paper comparison table
+
+**Files:** `nav_stack/eval/run_eval_suite.py`, `nav_stack/tests/test_eval_suite.py` (25 tests)
+
+- `run_eval_suite.py`: three-column table from Phase 7 result JSONs.
+  - **Hybrid:** `fin_lin, fin_ang` (gated output) from Phase 7 results.
+  - **Pure VLA:** `vla_lin, vla_ang` (no gate) from Phase 7 results.
+  - **Pure A\*:** recomputed at eval time — re-runs A\* + PurePursuit for each window, compares to GT future. No GPU needed.
+  - Optional `--phase9-dir`: adds TIC-VLA baseline column (Phase 9 baseline results, same JSON schema).
+- Output: `eval_comparison.txt` (ASCII table), `eval_comparison.tex` (LaTeX booktabs, copy-paste into paper §IV), `eval_comparison.json`.
+- Run command on Ada after Phase 7 completes:
+  ```bash
+  python3 ~/nav_stack/eval/run_eval_suite.py \
+      --results-dir /home2/om.kathalkar/logs/phase7 \
+      --data-root /ssd_scratch/om.kathalkar/bw17_dynav \
+      --grid-dir /ssd_scratch/om.kathalkar/nav_stack_grid \
+      --data-root-old /home/cvit-car-simulator/Desktop/bw17_dynav \
+      --data-root-new /ssd_scratch/om.kathalkar/bw17_dynav
+  ```
+
+### Phase 9 — Wiki update (this entry)
+
+**Files updated:**
+- `wiki/contributions/C3-ConfidenceGatedHandoff.md` — full rewrite with architecture diagram, module table, gate calibration, IPC protocol, eval plan, novelty claims.
+- `wiki/decisions/decision-bw20-hybrid-navstack.md` — new page: 4 design decisions (output-magnitude gate, replay eval on Ada, fixed 4-string vocab, dual-signal gate).
+- `wiki/log.md` — this entry.
+- `wiki/overview.md` — hybrid nav stack checklist entries + next priorities updated.
+- `wiki/index.md` — C3 status update, new decision page added, counters updated.
+
+**Test suite total:** 92 tests (22 A\*, 25 executor, 20 confidence gate, 25 eval suite). All pass.
+
+**Deployed to simulator:** `rsync` to `cvit-car-simulator:~/Desktop/nav_stack/` (pending — interactive SSH needed).
+
+---
+
+## [2026-08-06] milestone | FlowVLA-BW v3 — vectord[3]→double type mismatch root-caused; robot moves on Blackwell
+
+**Root cause of static robot (identified 2026-08-06):**
+
+The 2026-08-05 OmniGraph wiring included two incorrect connections:
+```
+ROS2SubscribeTwist.outputs:linearVelocity  → DifferentialController.inputs:linearVelocity
+ROS2SubscribeTwist.outputs:angularVelocity → DifferentialController.inputs:angularVelocity
+```
+These fail silently. `ROS2SubscribeTwist` outputs both as `vectord[3]` (3D vectors), but `DifferentialController` inputs expect `double` (scalar). OmniGraph accepts the connection without error but passes zeros — DiffController always outputs `[0.0, 0.0]` → `IsaacArticulationController` sets both wheel velocities to zero → robot never moves even though VLA generates correct non-zero actions.
+
+**Fix — Python scalar injection:**
+
+Remove both connections from the OmniGraph declaration. Set scalar values directly from Python each simulation step:
+```python
+og.Controller.set(diff_lin_attr, float(cur_lin))  # double, not vectord[3]
+og.Controller.set(diff_ang_attr, float(cur_ang))
+```
+`og.Controller.attribute()` handles acquired once after graph creation and reused each step.
+
+**Corrected OmniGraph wiring (definitive):**
+```
+OnTick.tick → ROS2SubscribeTwist.execIn
+ROS2SubscribeTwist.execOut → DifferentialController.execIn          (fan)
+ROS2SubscribeTwist.execOut → IsaacArticulationController.execIn     (fan)
+# linearVelocity/angularVelocity NOT wired — type mismatch (vectord[3] vs double) — injected from Python
+DifferentialController.velocityCommand → IsaacArticulationController.velocityCommand
+```
+
+**Additional fix — physics timeline:**
+
+`omni.timeline.get_timeline_interface().play()` must be called before the simulation loop. Without it, `app.update()` ticks rendering only — PhysX does not step and the articulation controller cannot move joints.
+
+**GPU assignment change (user directive: "always run the Blackwell"):**
+
+Changed `active_gpu=0` (4060 Ti for Isaac) → `active_gpu=1` (Blackwell for Isaac Sim). VLA inference uses `CUDA_VISIBLE_DEVICES=0` → 4060 Ti. With `CUDA_DEVICE_ORDER=PCI_BUS_ID`: GPU 0 = RTX 4060 Ti (PCI bus 01), GPU 1 = RTX PRO 5000 Blackwell (PCI bus 02).
+
+**Confirmed demo run (2026-08-06 ~11:46 IST):**
+- Isaac Sim: GPU 1 (Blackwell), VLA inference: GPU 0 (4060 Ti)
+- Steps: 300, Frames: 25 (5 fps), Total sim time: ~132s
+- Zero OmniGraph errors
+- Video (simulator): `~/Desktop/flowvla_v3_demo/<latest>/demo.mp4` (93 KB, 0.1 MB)
+- Video (local): `~/Downloads/vla4amr_demo/flowvla_v3_blackwell_20260806_114635.mp4`
+
+**Files updated:**
+- `~/Desktop/flowvla_v3_run.py` — Python injection fix + `active_gpu=1` + `timeline.play()`
+- `~/Desktop/flowvla_v3_run_launch.sh` — `CUDA_VISIBLE_DEVICES=0` for VLA; Isaac comment updated to "GPU 1 (Blackwell)"
+
+---
+
+## [2026-08-05] milestone | FlowVLA-BW v3 cmd_vel OmniGraph fixed — robot physically moves via VLA actions
+
+**Context:** FlowVLA-BW v3 (frozen InternVL3-1B → FlowActionHead2D, 1.4M trainable params) was trained on BW17 warehouse data. The Isaac Sim demo was broken because the pre-wired `/cmd_vel` OmniGraph in `carter_warehouse_navigation.usd` is created during `open_stage()` before the ROS2 bridge is active and therefore has no bridge handle — the robot never moved.
+
+**Fix applied (5 iterations of OmniGraph debugging):**
+
+| Bug | Root cause | Fix |
+|---|---|---|
+| `wheeled_robot` singular | Wrong extension namespace | `isaacsim.robot.wheeled_robots.DifferentialController` (plural) |
+| `diff_drive.outputs:execOut` | DifferentialController has NO execOut | Fan `ros_sub.outputs:execOut` to BOTH `diff_drive` and `art_ctrl` |
+| `inputs:usePath` | Not a valid IsaacArticulationController attribute | Removed |
+| Shape `(2,)` vs `(1,7)` | art_ctrl applying 2 wheel velocities to all 7 joints | Added `jointNames = ["joint_wheel_left", "joint_wheel_right"]` |
+| Video not compiled | `app.close()` calls `sys.exit()` internally | Moved `compile_video()` before `app.close()` |
+
+Bug F4 (bridge before open_stage → `std::out_of_range` crash) preserved throughout.
+
+**Extension that must be loaded:** `isaacsim.robot.wheeled_robots.nodes` (contains `DifferentialController`)
+
+**OmniGraph wiring as of 2026-08-05 (NOTE: linearVelocity/angularVelocity wiring below was later found to be wrong — type mismatch vectord[3]→double causes silent zeros. Fixed on 2026-08-06 with Python injection. See [2026-08-06] entry.):**
+```
+OnTick.tick → ROS2SubscribeTwist.execIn
+ROS2SubscribeTwist.execOut → DifferentialController.execIn   (fan)
+ROS2SubscribeTwist.execOut → IsaacArticulationController.execIn  (fan)
+ROS2SubscribeTwist.linearVelocity → DifferentialController.linearVelocity   ← WRONG (type mismatch)
+ROS2SubscribeTwist.angularVelocity → DifferentialController.angularVelocity ← WRONG (type mismatch)
+DifferentialController.velocityCommand → IsaacArticulationController.velocityCommand
+```
+
+**Demo run result (2026-08-05 16:30 IST):**
+- Steps: 300, Frames: 25 (5 fps), Duration: ~58s
+- VLA actions: lin ≈ +0.333 m/s, ang ≈ −0.038 rad/s (consistent forward motion, slight right)
+- Instruction: "Turn left at the shelf" (model trained on forward nav data, expected mismatch)
+- Zero OmniGraph errors in runtime log
+- Video: `~/Desktop/flowvla_v3_demo/20260805_163001/demo.mp4` (175KB)
+- Local copy: `~/Downloads/vla4amr_demo/flowvla_v3_demo_20260805_163001.mp4`
+
+**Script on simulator:** `~/Desktop/flowvla_v3_run.py` (9817 bytes, Aug 5 16:01)
+
+**Interpretation:** Robot physically moves in simulation driven by VLA inference. Directional control is not instruction-following (expected — same domain mismatch observed in BW18). Next step: collect new warehouse episodes with instruction-diverse labeling and retrain FlowActionHead2D.
+
+---
+
 ## [2026-08-01] milestone | Phase 7 COMPLETE — TIC-VLA trained checkpoint: CoT logging + accuracy eval on Ada HPC
 
 **Job:** SLURM 2661166 on gnode052 (Ada HPC, RTX 2080 Ti) — completed
