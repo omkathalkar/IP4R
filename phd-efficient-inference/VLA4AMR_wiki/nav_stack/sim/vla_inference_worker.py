@@ -22,6 +22,7 @@ IPC_DIR      = "/tmp/navstack_ipc"
 FRAME_IN     = os.path.join(IPC_DIR, "frame.jpg")
 FRAME_RD     = os.path.join(IPC_DIR, "frame.ready")
 INSTR_FILE   = os.path.join(IPC_DIR, "current_instruction.txt")
+ROBOT_STATE  = os.path.join(IPC_DIR, "robot_state.json")   # written by Isaac side for GoalCond
 ACT_OUT      = os.path.join(IPC_DIR, "action.json")
 ACT_RD       = os.path.join(IPC_DIR, "action.ready")
 QUIT_F       = os.path.join(IPC_DIR, "quit")
@@ -79,24 +80,80 @@ class FlowActionHead2D(nn.Module):
         return x
 
 
+class ActionRegressor(nn.Module):
+    """Direct MSE regression head — used by DynaNav-trained checkpoint."""
+    def __init__(self, feat_dim, hidden=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(feat_dim),
+            nn.Linear(feat_dim, hidden * 2), nn.SiLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden * 2, hidden), nn.SiLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden, 2),
+        )
+
+    def forward(self, feat):
+        return self.net(feat)
+
+    @torch.no_grad()
+    def sample(self, feat, n_steps=None):
+        return self.forward(feat)
+
+
+class ActionRegressorGoalCond(nn.Module):
+    """Text + geometric goal-delta → (lin, ang). No vision encoder needed."""
+    def __init__(self, feat_dim, hidden=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(feat_dim),
+            nn.Linear(feat_dim, hidden * 2), nn.SiLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden * 2, hidden), nn.SiLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden, 2),
+        )
+
+    def forward(self, feat):
+        return self.net(feat)
+
+    @torch.no_grad()
+    def sample(self, feat, n_steps=None):
+        return self.forward(feat)
+
+
+def _normalize_angle(a):
+    import math
+    while a >  math.pi: a -= 2 * math.pi
+    while a < -math.pi: a += 2 * math.pi
+    return a
+
+
 def load_model(ckpt_path):
-    ckpt  = torch.load(ckpt_path, map_location=DEVICE)
-    cfg   = ckpt["config"]
-    model = FlowActionHead2D(cfg["feat_dim"], cfg["hidden"],
-                             cfg["t_emb_dim"], cfg["n_layers"]).to(DEVICE)
+    ckpt = torch.load(ckpt_path, map_location=DEVICE)
+    cfg  = ckpt["config"]
+    model_type = ckpt.get("model_type", "FlowActionHead2D")
+    if model_type == "ActionRegressorGoalCond":
+        model = ActionRegressorGoalCond(cfg["feat_dim"], cfg.get("hidden", 256)).to(DEVICE)
+    elif model_type == "ActionRegressor":
+        model = ActionRegressor(cfg["feat_dim"], cfg.get("hidden", 256)).to(DEVICE)
+    else:
+        model = FlowActionHead2D(cfg["feat_dim"], cfg["hidden"],
+                                 cfg.get("t_emb_dim", T_EMB_DIM),
+                                 cfg.get("n_layers", 3)).to(DEVICE)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
     feat_mean = torch.tensor(ckpt["feat_mean"], dtype=torch.float32).to(DEVICE)
     feat_std  = torch.tensor(ckpt["feat_std"],  dtype=torch.float32).to(DEVICE)
     act_mean  = torch.tensor(ckpt["act_mean"],  dtype=torch.float32).to(DEVICE)
     act_std   = torch.tensor(ckpt["act_std"],   dtype=torch.float32).to(DEVICE)
-    return model, feat_mean, feat_std, act_mean, act_std
+    return model, feat_mean, feat_std, act_mean, act_std, model_type, ckpt.get("config", {})
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", default=os.path.expanduser(
-        "~/Desktop/flowvla_v3_output/flowvla_v3_best.pt"))
+        "~/Desktop/flowvla_dynanav_v3/flowvla_dynanav_best.pt"))
     args = ap.parse_args()
 
     os.makedirs(IPC_DIR, exist_ok=True)
@@ -124,8 +181,9 @@ def main():
     tokenizer    = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
     embed_tokens = backbone.vlm.language_model.model.embed_tokens
 
-    model, feat_mean, feat_std, act_mean, act_std = load_model(args.ckpt)
-    print(f"  FlowActionHead2D loaded ({sum(p.numel() for p in model.parameters()):,} params)")
+    model, feat_mean, feat_std, act_mean, act_std, model_type, cfg = load_model(args.ckpt)
+    print(f"  {model_type} loaded ({sum(p.numel() for p in model.parameters()):,} params)")
+    is_goalcond = (model_type == "ActionRegressorGoalCond")
 
     # feat_t cache — recompute only when instruction string changes
     cached_instr: str | None = None
@@ -143,7 +201,7 @@ def main():
         return cached_feat_t
 
     # Default instruction (forward) until Isaac Sim writes its first instruction
-    default_instr = "Drive forward through the warehouse aisle"
+    default_instr = "Drive forward to aisle six"
     _ = get_feat_t(default_instr)
 
     print("\nWaiting for frames... (Ctrl+C to stop)\n")
@@ -184,17 +242,31 @@ def main():
 
         feat_t = get_feat_t(instr)
 
-        try:
-            img_tensor = load_image(FRAME_IN, input_size=448, max_num=1).to(torch.bfloat16).to(DEVICE)
-            with torch.no_grad():
-                img_emb = backbone.vlm.extract_feature(img_tensor)
-                feat_v  = img_emb.reshape(-1, img_emb.shape[-1]).mean(0).float()
-        except Exception as e:
-            print(f"  [step {step}] Frame error: {e}")
-            if os.path.exists(FRAME_RD): os.remove(FRAME_RD)
-            continue
-
-        feat   = torch.cat([feat_v, feat_t]).unsqueeze(0)
+        if is_goalcond:
+            # GoalCond: text + geometric features; skip vision encoder
+            try:
+                rs = json.load(open(ROBOT_STATE))
+                dx = rs["goal_x"] - rs["robot_x"]
+                dy = rs["goal_y"] - rs["robot_y"]
+                dist = math.hypot(dx, dy)
+                h_err = _normalize_angle(math.atan2(dy, dx) - rs["robot_theta"])
+                geo = torch.tensor([dist, math.cos(h_err), math.sin(h_err)],
+                                   dtype=torch.float32, device=DEVICE)
+            except Exception as e:
+                print(f"  [step {step}] robot_state error: {e} — using zeros")
+                geo = torch.zeros(3, device=DEVICE)
+            feat = torch.cat([feat_t, geo]).unsqueeze(0)
+        else:
+            try:
+                img_tensor = load_image(FRAME_IN, input_size=448, max_num=1).to(torch.bfloat16).to(DEVICE)
+                with torch.no_grad():
+                    img_emb = backbone.vlm.extract_feature(img_tensor)
+                    feat_v  = img_emb.reshape(-1, img_emb.shape[-1]).mean(0).float()
+            except Exception as e:
+                print(f"  [step {step}] Frame error: {e}")
+                if os.path.exists(FRAME_RD): os.remove(FRAME_RD)
+                continue
+            feat = torch.cat([feat_v, feat_t]).unsqueeze(0)
         feat_n = (feat - feat_mean) / feat_std
         with torch.no_grad():
             pred_n = model.sample(feat_n)
