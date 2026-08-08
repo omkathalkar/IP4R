@@ -3,6 +3,27 @@
 Append-only. Each entry: `## [YYYY-MM-DD] type | title`
 Types: ingest | query | lint | decision | milestone | setup
 
+## [2026-08-08] milestone | Large Dataset Collection — 30,523 frames, 83/100 episodes REACHED
+
+**Scope:** Collected the Isaac-Synthetic large training dataset for ActionRegressor retraining.
+100 episodes × 10 DynaNav targets, random starts 2.5–9m from goal, random heading.
+
+**Dataset:** `~/Desktop/large_dataset/20260808_221536/` on cvit-car-simulator
+- **30,523 frames** total at 5 Hz (640×360, front-hawk left camera, native 90° roll orientation)
+- **83/100 REACHED** (83%); 17 TIMEOUTs all on >30m start distances
+- JSONL: `dataset.jsonl`; per-episode frames in `frames/ep_{id}_{label}/`
+
+**Bugs fixed during collection:**
+1. `teleport_carter()` rotation never applied — Nova Carter uses `xformOp:orient` with **GfQuatd** (double precision), not GfQuatf or TypeRotateXYZ. Fix: `op.Set(Gf.Quatd(cos(h/2), 0, 0, sin(h/2)))`.
+2. Settle time doubled: 40 → 80 ticks. Robot Z raised: 0.15 → 0.20m.
+
+**Known limitations:**
+- Aisle-corridor frames are visually uniform (white shelf backs, ~4–8 KB JPEG). Valid data, low visual information.
+- 17 TIMEOUTs on very long episodes (>30m); increase `max_steps` to 600 for next run.
+- Camera renders in native 90° roll — consistent across all frames, fine for training.
+
+**Next:** Retrain ActionRegressor on this dataset with `train/flowvla_train_dynanav.py`.
+
 ## [2026-08-07] milestone | C3 Hybrid Nav Stack — Phases 5–9 complete; 92-test suite; Ada HPC eval pipeline ready
 
 **Scope:** Full implementation of C3 confidence-gated A\*/VLA hybrid navigation stack. All 9 planned
