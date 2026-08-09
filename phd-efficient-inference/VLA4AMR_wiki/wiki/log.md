@@ -3,6 +3,116 @@
 Append-only. Each entry: `## [YYYY-MM-DD] type | title`
 Types: ingest | query | lint | decision | milestone | setup
 
+## [2026-08-09] milestone | Logical data collection — A* + Pure Pursuit replaces P-controller
+
+**Scope:** P-controller caused AMR to crash into rack structures during dataset collection.
+Root cause identified and fixed: replaced with A* global planner + Pure Pursuit path follower.
+Machine rebooted clean; new `large_dataset_v3` collection launched.
+
+**Root cause of collisions:**
+- P-controller steers in a straight line from spawn (y≈−3) to goal (y≈15–17)
+- Straight-line path traverses rack structures (y=2..25) outside aisle corridors
+- No obstacle avoidance → robot physically hits racks mid-traverse
+
+**Solution — A* + Pure Pursuit (follows VLA4AMR target architecture):**
+```
+Goal position → A* planner → waypoints → Pure Pursuit → cmd_vel → Isaac Sim
+```
+- `nav_stack/planning/astar_planner.py`: 8-connected A* on inflated occupancy grid
+- `nav_stack/control/pure_pursuit.py`: lookahead=1.2m, max_lin=0.35 m/s, max_ang=1.0 rad/s
+- Both already existed in nav_stack (Phase 2/5). Now used for data collection.
+
+**Warehouse occupancy grid generated** (`nav_stack/grid/warehouse_occupancy_grid.npy`):
+- 420×450 cells @ 0.1 m/cell (x:−30..+12, y:−10..+35)
+- 6 north-south aisle corridors at x ∈ {−23,−18,−13,−8.2,−3,2} m (2.8 m wide each)
+- Rack zone: y=2..25 m, occupied except inside aisle corridors
+- Robot inflation radius: 0.4 m (NovaCarter)
+- Free cells: 105,596 / 189,000 (55.9% free)
+
+**A* connectivity verified** — all 10 DynaNav targets reachable:
+| Target | Path | WPs |
+|:-------|:-----|:---:|
+| forklift (-5,-3)→(2.5,10.6) | south floor → aisle_06 north | 8 |
+| aisle_06 (-5,-3)→(2.0,17.0) | south floor → aisle_06 | 8 |
+| danger (-5,-3)→(-3.0,12.5) | south floor → aisle_05 | 5 |
+| aisle_05 (-5,-3)→(-3.0,19.0) | south floor → aisle_05 | 7 |
+| aisle_04 (-8,-3)→(-8.2,17.0) | enter aisle_04 | 2 |
+| aisle_03 (-13,-3)→(-13.0,17.0) | enter aisle_03 | 2 |
+| aisle_02 (-18,-3)→(-18.0,17.0) | enter aisle_02 | 2 |
+| aisle_01 (-22,-3)→(-23.0,17.0) | south floor → aisle_01 | 4 |
+| first_aid (-24,-4)→(-26.0,1.1) | south entry band | 4 |
+| safety_sw (-2,-3)→(0.5,30.0) | aisle_06 → north open | 4 |
+
+**large_collect.py rewritten** (`nav_stack/sim/large_collect.py`):
+- Grid generated once at startup (auto-saves to `grid/`)
+- A* plans collision-free path per episode before teleport
+- Pure Pursuit follows waypoints (wp_idx advances within 0.6 m)
+- max_steps increased 400 → 600 (A* paths longer than straight lines)
+- Output: `~/Desktop/large_dataset_v3/<ts>/`
+
+**Collection running** (GPU 1 Blackwell, PID 690518):
+- 500 episodes × 10 targets, seed=42
+- Early result: ep0 forklift 14.7m → REACHED in 221 steps (6 WPs) ✓
+- ep1 aisle_03 22.5m → TIMEOUT 600 (dead-reckoning divergence over long path)
+- ep2 aisle_03 19.9m → REACHED 296 steps (4 WPs) ✓
+
+**FlowVLA flow_v2 training completed** (before reboot):
+- Dataset: `large_dataset_v2` (30,523 frames, P-controller)
+- Best flow loss: 0.170749 at epoch 500
+- MAE lin: 0.00634 (norm), ang: 0.01853 (norm) — ODE direction fix confirmed working
+- Checkpoint: `~/Desktop/flowvla_flow_v2/flowvla_flow_best.pt`
+
+**Next:** Let `large_dataset_v3` finish (500 eps, ~8 hrs), then retrain FlowVLA flow on A* data.
+
+---
+
+## [2026-08-08] milestone | GoalCond ActionRegressor training + closed-loop eval launched
+
+**Scope:** Visual ActionRegressor retrain (on 30,523-frame dataset) failed — null model (loss stuck at 1.0).
+Pivoted to GoalCond architecture (text + geometric features only, no vision encoder).
+
+**Why visual model failed:**
+- P-controller labels are pure geometry → no visual-to-action mapping exists in the data
+- White warehouse frames → near-constant InternVL3-1B embeddings → zero discriminative signal
+- Diagnosis: output layer bias mean/std ≈ 0.00002/0.00001 → predicting dataset mean (null model)
+
+**GoalCond training** (`flowvla_train_goalcond.py`, tic-vla env, GPU 0):
+- Architecture: `ActionRegressorGoalCond` — 3-layer MLP, input = text_feat(896) ‖ [dist, cos(h_err), sin(h_err)], output = (lin_vel, ang_vel)
+- Result: **best loss = 0.053853**, val_MAE lin=0.0019 ang=0.0004 (≈18× better than null model)
+- Checkpoint: `~/Desktop/flowvla_goalcond/flowvla_goalcond_best.pt`
+- Effectively learns the P-controller analytically from text + geometry
+
+**Inference worker updated** (`vla_inference_worker.py`):
+- Added `ActionRegressorGoalCond` class + `is_goalcond` branch
+- Added `robot_state.json` IPC file: `{robot_x, robot_y, robot_theta, goal_x, goal_y}`
+- Falls back to vision-only path for non-GoalCond checkpoints
+
+**Closed-loop eval launched** (`goalcond_eval_all_targets.py`):
+- 30 episodes × 10 DynaNav targets × 3 starts (random heading, 2.5–8m from goal)
+- Self-contained: GoalCond MLP + Isaac Sim in single process, dead-reckoned position tracking
+- Fix applied: text features pre-computed in tic-vla env → `flowvla_goalcond_best_text_feats.pt` (avoids pytorch_lightning/einops in isaac6)
+- Status: running, first results: forklift 3/3 REACHED, aisle_06 ep3 REACHED
+
+**Eval results — 28/30 (93.3%) success rate:**
+
+| Target       | SR    | Notes |
+|:-------------|:-----:|:------|
+| forklift     | 3/3   | 39–50 steps |
+| aisle_06     | 3/3   | 83–99 steps |
+| danger       | 3/3   | 32–99 steps |
+| aisle_05     | 3/3   | 54–102 steps |
+| aisle_04     | 3/3   | 31–76 steps |
+| aisle_03     | 3/3   | 62–82 steps |
+| aisle_02     | 3/3   | 34–100 steps |
+| aisle_01     | 3/3   | 29–93 steps |
+| first_aid    | 3/3   | 37–67 steps |
+| safety_sw    | 1/3   | 2 TIMEOUTs, both end at 4.322m (geometric trap) |
+
+- Both safety_sw timeouts end at identical 4.322m final distance → robot enters limit cycle at ~4.3m from goal
+- ep27 (start 4.39m, heading 0.29): barely moves; ep29 (start 6.73m) converges to 4.3m then stalls
+- Hypothesis: small training coverage of safety_sw (was zero-start target in original map-constrained collection)
+- Result file: `~/Desktop/goalcond_eval/eval_20260809_022558.json`
+
 ## [2026-08-08] milestone | Large Dataset Collection — 30,523 frames, 83/100 episodes REACHED
 
 **Scope:** Collected the Isaac-Synthetic large training dataset for ActionRegressor retraining.

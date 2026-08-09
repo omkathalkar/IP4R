@@ -1,74 +1,124 @@
 #!/usr/bin/env python3
 """
-large_collect.py — Large diverse dataset collection for VLA training.
+large_collect.py — Logical dataset collection with A* + Pure Pursuit navigation.
 
-100 episodes × 10 DynaNav targets, each with:
-  - Random start position (2–10m from goal) sampled from floor-plan free space
-  - Random initial heading (uniform 0–2π)
-  - Proportional waypoint controller to goal
-  - Front-hawk frame + (lin_vel, ang_vel) saved at 5 Hz
+Architecture (mirrors VLA4AMR target architecture):
+  Goal position → A* planner → waypoints → Pure Pursuit → cmd_vel → Isaac Sim
 
-Target: ~10,000 frames across varied visual contexts and headings.
+This replaces the P-controller:
+  - A* plans collision-free paths through warehouse aisles (no rack crashes)
+  - Pure Pursuit provides smooth curved path-following
+  - Grid is generated once from the known warehouse layout
 
-Requires:
-  ~/Desktop/vslam_data/<ts>/map.pgm  ← occupancy grid (5 cm/px, from build_grid_from_gt.py)
-
-Usage (via large_collect.sh):
+Usage (isaac6 env, GPU 1):
   conda activate isaac6
-  python3 large_collect.py [--map <map.pgm>] [--episodes 100] [--seed 42]
+  python3 large_collect.py [--episodes 500] [--seed 42]
 """
 
 import sys, os, time, math, json, argparse, datetime, signal
 import numpy as np
 from pathlib import Path
+from scipy.ndimage import binary_dilation
+
+# ── Nav stack imports ──────────────────────────────────────────────────────────
+NAV_STACK = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(NAV_STACK))
+from common import GridMeta, Waypoint
+from planning.astar_planner import plan_path
+from control.pure_pursuit import PurePursuit
 
 # ── Args ──────────────────────────────────────────────────────────────────────
 ap = argparse.ArgumentParser()
-ap.add_argument("--map", default=None,
-    help="Path to map.pgm (default: newest ~/Desktop/vslam_data/*/map.pgm)")
-ap.add_argument("--episodes", type=int, default=100,
-    help="Total episodes to collect (default 100, 10 per target)")
-ap.add_argument("--seed", type=int, default=42)
-ap.add_argument("--max_steps", type=int, default=400,  # 80s @ 5Hz
-    help="Max controller steps per episode")
+ap.add_argument("--episodes",  type=int, default=500)
+ap.add_argument("--seed",      type=int, default=42)
+ap.add_argument("--max_steps", type=int, default=600,   # 120s @ 5Hz
+                help="Max Pure Pursuit steps per episode (A* paths are longer than straight lines)")
 args = ap.parse_args()
 
-# ── Locate map ─────────────────────────────────────────────────────────────────
-if args.map is None:
-    candidates = sorted(Path.home().glob("Desktop/vslam_data/*/map.pgm"))
-    if not candidates:
-        print("ERROR: no map.pgm found. Run build_grid_from_gt.py first."); sys.exit(1)
-    MAP_PATH = candidates[-1]
+# ── Warehouse occupancy grid ───────────────────────────────────────────────────
+# Layout derived from spawn zones + goal positions of carter_warehouse_navigation.
+# Six north-south aisles at x ∈ {-23,-18,-13,-8.2,-3,2}, each 2.8m wide.
+# Robots spawn on the open south floor (y < 0) and navigate north through aisles.
+GRID_DIR   = NAV_STACK / "grid"
+GRID_NPY   = GRID_DIR / "warehouse_occupancy_grid.npy"
+GRID_YAML  = GRID_DIR / "warehouse_occupancy_meta.yaml"
+
+_G_RES    = 0.1         # 10 cm/cell
+_G_OX     = -30.0       # world X of cell (0,0)
+_G_OY     = -10.0       # world Y of cell (0,0)
+_G_W      = 42.0        # arena width  → x: -30 to +12
+_G_H      = 45.0        # arena height → y: -10 to +35
+_AISLE_CX = [-23.0, -18.0, -13.0, -8.2, -3.0, 2.0]
+_AISLE_HW = 1.4         # half-width → 2.8 m corridors
+_RACK_Y0  = 2.0         # racks start at y = 2 m
+_RACK_Y1  = 25.0        # racks end   at y = 25 m
+_R_RADIUS = 0.4         # NovaCarter inflation radius (m)
+
+
+def _build_grid():
+    import yaml
+    cols = int(_G_W / _G_RES)
+    rows = int(_G_H / _G_RES)
+    g    = np.zeros((rows, cols), dtype=np.uint8)
+
+    def wc(x): return int((x - _G_OX) / _G_RES)
+    def wr(y): return int((y - _G_OY) / _G_RES)
+    wall = int(0.5 / _G_RES)                     # 0.5 m outer wall
+
+    # Outer walls
+    g[:wall, :] = 255;  g[-wall:, :] = 255
+    g[:, :wall] = 255;  g[:, -wall:] = 255
+
+    # Mark rack zone as occupied, then carve aisle corridors
+    r0, r1 = wr(_RACK_Y0), wr(_RACK_Y1)
+    g[r0:r1, wall:cols - wall] = 255
+    for ax in _AISLE_CX:
+        c0 = max(wall, wc(ax - _AISLE_HW))
+        c1 = min(cols - wall, wc(ax + _AISLE_HW))
+        g[r0:r1, c0:c1] = 0
+
+    # Inflate by robot radius so A* paths have clearance
+    rad    = int(np.ceil(_R_RADIUS / _G_RES))
+    struct = np.ones((2 * rad + 1, 2 * rad + 1), dtype=bool)
+    inf_g  = binary_dilation(g > 127, structure=struct).astype(np.uint8) * 255
+
+    meta = GridMeta(_G_RES, _G_OX, _G_OY, cols, rows)
+    GRID_DIR.mkdir(exist_ok=True)
+    np.save(GRID_NPY, inf_g)
+    yaml.dump({"resolution": _G_RES, "origin_x": _G_OX, "origin_y": _G_OY,
+               "width": cols, "height": rows},
+              open(GRID_YAML, "w"))
+    return inf_g, meta
+
+
+def _load_grid():
+    import yaml
+    g    = np.load(GRID_NPY)
+    d    = yaml.safe_load(GRID_YAML.read_text())
+    return g, GridMeta(**d)
+
+
+if GRID_NPY.exists() and GRID_YAML.exists():
+    occ_grid, grid_meta = _load_grid()
+    print(f"Grid loaded: {grid_meta.width}×{grid_meta.height} @ {_G_RES}m/cell")
 else:
-    MAP_PATH = Path(args.map)
-print(f"Floor plan: {MAP_PATH}")
+    print("Generating warehouse occupancy grid ...")
+    occ_grid, grid_meta = _build_grid()
+    free = (occ_grid == 0).sum()
+    print(f"Grid generated: {grid_meta.width}×{grid_meta.height}  free={free:,} cells")
 
-# ── Floor plan free-space ──────────────────────────────────────────────────────
-from PIL import Image as PILImage
-grid_img = np.array(PILImage.open(MAP_PATH))
-# PGM is saved flipped (row0=top=maxY); flip back so row0=south
-grid = np.flipud(grid_img)
-FREE_MASK = (grid == 254)
-RES      = 0.05      # m/pixel
-ORIGIN_X = -29.5
-ORIGIN_Y = -11.0
-MAP_H, MAP_W = grid.shape
+pp = PurePursuit(lookahead_dist=1.2, max_lin=0.35, max_ang=1.0, min_lin=0.10)
+WP_ADVANCE = 0.6   # advance waypoint when within this distance (m)
 
-def world_to_px(wx, wy):
-    return int((wx - ORIGIN_X) / RES), int((wy - ORIGIN_Y) / RES)
 
-def is_free(wx, wy, margin_m=0.5):
-    """True if world position + margin is in free space."""
-    r_px = int(margin_m / RES)
-    col, row = world_to_px(wx, wy)
-    for dr in range(-r_px, r_px+1):
-        for dc in range(-r_px, r_px+1):
-            rr, cc = row+dr, col+dc
-            if not (0 <= rr < MAP_H and 0 <= cc < MAP_W):
-                return False
-            if not FREE_MASK[rr, cc]:
-                return False
-    return True
+def plan_episode(sx, sy, gx, gy):
+    """Return A* Waypoint list or None on failure."""
+    try:
+        return plan_path(occ_grid, (sx, sy), (gx, gy), grid_meta)
+    except Exception as e:
+        print(f"  [A* skip] {e}", flush=True)
+        return None
+
 
 # ── Episode targets ────────────────────────────────────────────────────────────
 TARGETS = [
@@ -84,6 +134,19 @@ TARGETS = [
     {"id": 9, "label": "safety_sw", "goal": ( 0.5, 30.0), "instruction": "Navigate to the safety switch"},
 ]
 
+SPAWN_ZONES = {
+    "forklift"  : (-6.0,  7.0, -5.0, -1.0),
+    "aisle_06"  : (-5.0,  7.0, -5.0, -1.0),
+    "danger"    : (-9.0,  3.0, -5.0, -1.0),
+    "aisle_05"  : (-9.0,  3.0, -5.0, -1.0),
+    "aisle_04"  : (-14.0, -2.0,-5.0, -1.0),
+    "aisle_03"  : (-19.0, -7.0,-5.0, -1.0),
+    "aisle_02"  : (-25.0,-12.0,-5.0, -1.0),
+    "aisle_01"  : (-26.0,-18.0,-5.0, -1.0),
+    "first_aid" : (-26.0,-20.0,-7.0, -1.0),
+    "safety_sw" : ( -4.0,  5.0, -5.0, -1.0),
+}
+
 # ── Generate episode specs ─────────────────────────────────────────────────────
 np.random.seed(args.seed)
 N_EP_PER_TARGET = args.episodes // len(TARGETS)
@@ -91,43 +154,48 @@ episodes = []
 
 for tgt in TARGETS:
     gx, gy = tgt["goal"]
-    count = 0
-    attempts = 0
-    while count < N_EP_PER_TARGET and attempts < 2000:
+    zone   = SPAWN_ZONES[tgt["label"]]
+    x_lo, x_hi, y_lo, y_hi = zone
+    count = attempts = 0
+    while count < N_EP_PER_TARGET and attempts < 4000:
         attempts += 1
-        dist    = np.random.uniform(2.5, 9.0)
-        angle   = np.random.uniform(0, 2 * math.pi)
-        sx      = gx + dist * math.cos(angle)
-        sy      = gy + dist * math.sin(angle)
-        heading = np.random.uniform(0, 2 * math.pi)   # random initial orientation
-        if is_free(sx, sy, margin_m=0.45):
-            episodes.append({
-                "ep_id":       len(episodes),
-                "target_id":   tgt["id"],
-                "label":       tgt["label"],
-                "instruction": tgt["instruction"],
-                "start":       [round(sx, 3), round(sy, 3)],
-                "heading":     round(heading, 4),   # radians
-                "goal":        [gx, gy],
-                "dist_m":      round(math.hypot(gx-sx, gy-sy), 2),
-            })
-            count += 1
-
-# Fill remaining with spawn-based starts if needed
-while len(episodes) < args.episodes:
-    tgt = np.random.choice(TARGETS)
-    gx, gy = tgt["goal"]
-    sx = np.random.uniform(-25, 5)
-    sy = np.random.uniform(-8, 28)
-    if is_free(sx, sy):
+        sx = np.random.uniform(x_lo, x_hi)
+        sy = np.random.uniform(y_lo, y_hi)
+        d  = math.hypot(gx - sx, gy - sy)
+        if d < 2.0 or d > 25.0:
+            continue
+        goal_angle = math.atan2(gy - sy, gx - sx)
+        heading    = goal_angle + np.random.uniform(-math.pi / 4, math.pi / 4)
         episodes.append({
             "ep_id": len(episodes), "target_id": tgt["id"],
-            "label": tgt["label"], "instruction": tgt["instruction"],
-            "start": [round(sx,3), round(sy,3)],
-            "heading": round(np.random.uniform(0, 2*math.pi), 4),
-            "goal": [gx, gy],
-            "dist_m": round(math.hypot(gx-sx, gy-sy), 2),
+            "label": tgt["label"],  "instruction": tgt["instruction"],
+            "start": [round(sx, 3), round(sy, 3)],
+            "heading": round(heading % (2 * math.pi), 4),
+            "goal":  [gx, gy], "dist_m": round(d, 2),
         })
+        count += 1
+    if count < N_EP_PER_TARGET:
+        print(f"  WARNING: {tgt['label']} only got {count}/{N_EP_PER_TARGET} spawns")
+
+while len(episodes) < args.episodes:
+    tgt   = TARGETS[np.random.randint(len(TARGETS))]
+    gx, gy = tgt["goal"]
+    zone   = SPAWN_ZONES[tgt["label"]]
+    x_lo, x_hi, y_lo, y_hi = zone
+    sx = np.random.uniform(x_lo, x_hi)
+    sy = np.random.uniform(y_lo, y_hi)
+    d  = math.hypot(gx - sx, gy - sy)
+    if d < 2.0 or d > 25.0:
+        continue
+    goal_angle = math.atan2(gy - sy, gx - sx)
+    heading    = goal_angle + np.random.uniform(-math.pi / 4, math.pi / 4)
+    episodes.append({
+        "ep_id": len(episodes), "target_id": tgt["id"],
+        "label": tgt["label"],  "instruction": tgt["instruction"],
+        "start": [round(sx, 3), round(sy, 3)],
+        "heading": round(heading % (2 * math.pi), 4),
+        "goal": [gx, gy], "dist_m": round(d, 2),
+    })
 
 np.random.shuffle(episodes)
 for i, ep in enumerate(episodes): ep["ep_id"] = i
@@ -137,18 +205,18 @@ for tgt in TARGETS:
     n = sum(1 for e in episodes if e["target_id"] == tgt["id"])
     print(f"  {tgt['label']:12s}: {n} episodes")
 
-# ── Output ────────────────────────────────────────────────────────────────────
-ts      = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-OUT_DIR = Path.home() / f"Desktop/large_dataset/{ts}"
+# ── Output paths ──────────────────────────────────────────────────────────────
+ts     = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+OUT_DIR = Path.home() / f"Desktop/large_dataset_v3/{ts}"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
-DATASET_F = OUT_DIR / "dataset.jsonl"
-SUMMARY_F = OUT_DIR / "summary.json"
+DATASET_F      = OUT_DIR / "dataset.jsonl"
+SUMMARY_F      = OUT_DIR / "summary.json"
 EPISODE_SPEC_F = OUT_DIR / "episode_specs.json"
 
 with open(EPISODE_SPEC_F, "w") as f:
     json.dump({"n": len(episodes), "episodes": episodes}, f, indent=2)
 
-# ── Isaac Sim ─────────────────────────────────────────────────────────────────
+# ── Isaac Sim setup ────────────────────────────────────────────────────────────
 SCENE_PATH       = os.path.expanduser("~/TIC-VLA/DynaNav/assets/warehouse_20x20/warehouse_20x20.usd")
 CARTER_URL       = (
     "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
@@ -156,26 +224,15 @@ CARTER_URL       = (
 )
 CARTER_PRIM_PATH = "/World/Nova_Carter_ROS"
 FRONT_CAM_PATH   = f"{CARTER_PRIM_PATH}/chassis_link/sensors/front_hawk/left/camera_left"
-SIM_HZ   = 60
-SEND_HZ  = 5
+SIM_HZ    = 60
+SEND_HZ   = 5
 SEND_STEP = SIM_HZ // SEND_HZ
-
-K_ANG   = 1.5; K_LIN = 0.40; ANG_MAX = 0.80; LIN_MAX = 0.40; LIN_MIN = 0.08
 GOAL_RADIUS = 1.0
 
 def normalize_angle(a):
     while a >  math.pi: a -= 2 * math.pi
     while a < -math.pi: a += 2 * math.pi
     return a
-
-def controller(rx, ry, rtheta, gx, gy):
-    dx, dy    = gx - rx, gy - ry
-    dist      = math.hypot(dx, dy)
-    err       = normalize_angle(math.atan2(dy, dx) - rtheta)
-    ang_vel   = float(np.clip(K_ANG * err, -ANG_MAX, ANG_MAX))
-    lin_frac  = max(0.0, 1.0 - abs(err) / (math.pi / 2))
-    lin_vel   = float(np.clip(K_LIN * lin_frac, LIN_MIN, LIN_MAX))
-    return lin_vel, ang_vel, dist
 
 print("\nStarting Isaac Sim...")
 from isaacsim import SimulationApp
@@ -186,6 +243,7 @@ app = SimulationApp({
 import omni.usd, omni.kit.app
 import omni.replicator.core as rep
 from pxr import UsdGeom, Gf
+from PIL import Image as PILImage
 
 print("Loading warehouse_20x20.usd ...")
 omni.usd.get_context().open_stage(SCENE_PATH)
@@ -196,19 +254,18 @@ for i in range(1000):
     if s and sum(1 for _ in s.Traverse()) > 30:
         stage = s; break
     if i % 200 == 0: print(f"  [{i}] waiting...", flush=True)
-    import time; time.sleep(0.05)
+    time.sleep(0.05)
 if stage is None:
     print("ERROR: stage failed to load"); app.close(); sys.exit(1)
 print(f"  Loaded ({sum(1 for _ in stage.Traverse())} prims)")
 
 from isaacsim.core.utils.stage import add_reference_to_stage
-SPAWN = (5.0, -8.0, 0.15)
 add_reference_to_stage(usd_path=CARTER_URL, prim_path=CARTER_PRIM_PATH)
 carter_prim = stage.GetPrimAtPath(CARTER_PRIM_PATH)
 xf = UsdGeom.Xformable(carter_prim)
 for op in xf.GetOrderedXformOps():
     if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
-        op.Set(Gf.Vec3d(*SPAWN)); break
+        op.Set(Gf.Vec3d(5.0, -8.0, 0.15)); break
 for _ in range(200): app.update()
 
 mgr = omni.kit.app.get_app().get_extension_manager()
@@ -251,7 +308,6 @@ diff_ang = og.Controller.attribute("/ActionGraph_lc/diff_drive.inputs:angularVel
 print("OmniGraph ready ✓")
 for _ in range(120): app.update()
 
-# Camera
 front_prim = stage.GetPrimAtPath(FRONT_CAM_PATH)
 cam_use    = FRONT_CAM_PATH if front_prim.IsValid() else "/World/OverviewCam"
 rp_front   = rep.create.render_product(cam_use, (640, 360))
@@ -263,11 +319,9 @@ print(f"Camera: {cam_use}")
 _teleport_diag_done = False
 
 def teleport_carter(sx, sy, heading_rad):
-    """Move Carter to (sx, sy, 0.20) facing heading_rad and settle."""
     global _teleport_diag_done
     og.Controller.set(diff_lin, 0.0); og.Controller.set(diff_ang, 0.0)
     for _ in range(10): app.update()
-
     h2 = heading_rad / 2.0
     rot_applied = False
     for op in xf.GetOrderedXformOps():
@@ -277,21 +331,14 @@ def teleport_carter(sx, sy, heading_rad):
         if ot == UsdGeom.XformOp.TypeTranslate:
             op.Set(Gf.Vec3d(sx, sy, 0.20))
         elif ot == UsdGeom.XformOp.TypeRotateXYZ:
-            op.Set(Gf.Vec3f(0.0, 0.0, math.degrees(heading_rad)))
-            rot_applied = True
+            op.Set(Gf.Vec3f(0.0, 0.0, math.degrees(heading_rad))); rot_applied = True
         elif ot == UsdGeom.XformOp.TypeOrient:
-            # quaternion: rotation around Z by heading_rad (double precision required by NovaCarter)
-            op.Set(Gf.Quatd(math.cos(h2), 0.0, 0.0, math.sin(h2)))
-            rot_applied = True
+            op.Set(Gf.Quatd(math.cos(h2), 0.0, 0.0, math.sin(h2))); rot_applied = True
         elif ot == UsdGeom.XformOp.TypeRotateZ:
-            op.Set(float(math.degrees(heading_rad)))
-            rot_applied = True
-
+            op.Set(float(math.degrees(heading_rad))); rot_applied = True
     if not _teleport_diag_done:
         print(f"  [diag] rot_applied={rot_applied}", flush=True)
         _teleport_diag_done = True
-
-    # 80 ticks (~1.3 s at 60 Hz) for physics to settle after teleport
     for _ in range(80): app.update()
 
 def stop(sig, _):
@@ -301,14 +348,15 @@ signal.signal(signal.SIGINT, stop)
 signal.signal(signal.SIGTERM, stop)
 
 # ── Collection loop ────────────────────────────────────────────────────────────
-dt         = 1.0 / SEND_HZ
-dataset_f  = open(DATASET_F, "w")
+dt           = 1.0 / SEND_HZ
+dataset_f    = open(DATASET_F, "w")
 ep_summaries = []
 total_frames = 0
+n_skipped    = 0
 
-print(f"\nCollecting {len(episodes)} episodes ...")
-print(f"{'EP':>4}  {'Label':12}  {'Dist':>6}  {'Steps':>6}  {'Frames':>7}  Status")
-print("─" * 56)
+print(f"\nCollecting {len(episodes)} episodes (A* + Pure Pursuit) ...")
+print(f"{'EP':>4}  {'Label':12}  {'Dist':>6}  {'WPs':>4}  {'Steps':>6}  {'Frames':>7}  Status")
+print("─" * 63)
 
 for ep in episodes:
     ep_id   = ep["ep_id"]
@@ -319,6 +367,14 @@ for ep in episodes:
     label   = ep["label"]
     ep_dist = ep["dist_m"]
 
+    # Plan collision-free A* path before spawning
+    waypoints = plan_episode(sx, sy, gx, gy)
+    if waypoints is None:
+        n_skipped += 1
+        print(f"{ep_id:>4}  {label:12}  {ep_dist:>5.1f}m  {'--':>4}  {'--':>6}  {'--':>7}  SKIP (A* fail)",
+              flush=True)
+        continue
+
     ep_dir = OUT_DIR / "frames" / f"ep_{ep_id:04d}_{label}"
     ep_dir.mkdir(parents=True, exist_ok=True)
 
@@ -327,7 +383,8 @@ for ep in episodes:
     robot_x, robot_y, robot_theta = sx, sy, heading
     cur_lin = cur_ang = 0.0
     ep_step = ep_frame = 0
-    done = False
+    wp_idx  = 0
+    done    = False
     sim_tick = 0
 
     while ep_step < args.max_steps and not done:
@@ -339,9 +396,21 @@ for ep in episodes:
         if sim_tick % SEND_STEP != 0:
             continue
 
-        lin_vel, ang_vel, dist = controller(robot_x, robot_y, robot_theta, gx, gy)
+        # Advance waypoint index when robot is close enough
+        while wp_idx < len(waypoints) - 1:
+            if math.hypot(robot_x - waypoints[wp_idx].x,
+                          robot_y - waypoints[wp_idx].y) < WP_ADVANCE:
+                wp_idx += 1
+            else:
+                break
+
+        dist = math.hypot(gx - robot_x, gy - robot_y)
         if dist < GOAL_RADIUS:
-            done = True; lin_vel = ang_vel = 0.0
+            done = True
+            lin_vel = ang_vel = 0.0
+        else:
+            lin_vel, ang_vel = pp.compute(robot_x, robot_y, robot_theta, waypoints, wp_idx)
+
         cur_lin, cur_ang = lin_vel, ang_vel
 
         rep.orchestrator.step()
@@ -363,6 +432,7 @@ for ep in episodes:
             "robot_x": round(robot_x, 3), "robot_y": round(robot_y, 3),
             "robot_theta": round(robot_theta, 4),
             "dist_to_goal": round(dist, 3),
+            "wp_idx": wp_idx, "n_waypoints": len(waypoints),
             "goal_x": gx, "goal_y": gy,
             "start_x": sx, "start_y": sy, "start_heading": heading,
         }) + "\n")
@@ -379,11 +449,12 @@ for ep in episodes:
     ep_summaries.append({
         "ep_id": ep_id, "label": label, "instruction": instr,
         "start": [sx, sy], "heading": heading, "goal": [gx, gy],
+        "n_waypoints": len(waypoints),
         "steps": ep_step, "frames": ep_frame, "status": status,
         "dist_final": round(dist_f, 3), "end_pos": [round(robot_x,3), round(robot_y,3)],
     })
-    print(f"{ep_id:>4}  {label:12}  {ep_dist:>5.1f}m  {ep_step:>6}  {ep_frame:>7}  {status}",
-          flush=True)
+    print(f"{ep_id:>4}  {label:12}  {ep_dist:>5.1f}m  {len(waypoints):>4}  "
+          f"{ep_step:>6}  {ep_frame:>7}  {status}", flush=True)
     for _ in range(20): app.update()
 
 dataset_f.close()
@@ -391,16 +462,16 @@ dataset_f.close()
 reached = sum(1 for e in ep_summaries if e["status"] == "REACHED")
 with open(SUMMARY_F, "w") as f:
     json.dump({
-        "ts": ts, "total_frames": total_frames,
-        "n_episodes": len(episodes), "reached": reached,
+        "ts": ts, "total_frames": total_frames, "controller": "astar_pure_pursuit",
+        "n_episodes": len(ep_summaries), "reached": reached, "skipped": n_skipped,
         "episodes": ep_summaries,
     }, f, indent=2)
 
 app.close()
-print("\n" + "=" * 56)
-print(f"Large dataset collection complete")
-print(f"  Episodes   : {reached}/{len(episodes)} REACHED")
+print("\n" + "=" * 63)
+print(f"Dataset collection complete (A* + Pure Pursuit)")
+print(f"  Episodes   : {reached}/{len(ep_summaries)} REACHED  ({n_skipped} skipped A* fail)")
 print(f"  Total frames: {total_frames:,}")
 print(f"  Dataset dir : {OUT_DIR}")
 print(f"  JSONL       : {DATASET_F}")
-print("=" * 56)
+print("=" * 63)
