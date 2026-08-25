@@ -1,7 +1,7 @@
 # VLA4AMR Wiki — Master Index
 
-**Last updated:** 2026-08-07 (C3 hybrid nav stack Phase 9 wiki update)
-**Total pages:** 36
+**Last updated:** 2026-08-10 (FlowVLA-BW architecture page added)
+**Total pages:** 37
 **Wiki maintainer:** Claude (Chetak)
 
 ---
@@ -57,6 +57,7 @@
 
 | Page | Type | Status | Summary |
 |------|------|--------|---------|
+| [[FlowVLA-BW]] | architecture | active | Rectified-flow action head on frozen InternVL3-1B; v1/v2/v3 variants; 1.4M trainable params |
 | [[NovaCarter]] | architecture | active | NVIDIA reference AMR — Hawk stereo + LiDAR, Isaac-native, our simulation platform |
 | [[IsaacSim]] | architecture | active | NVIDIA Isaac Sim, ROS 2 Jazzy bridge, warehouse_with_forklifts world |
 | [[ROS2-Pipeline]] | architecture | active | VLA inference node, file-based IPC bridge, async 10Hz pipeline |

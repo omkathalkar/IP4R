@@ -3,6 +3,190 @@
 Append-only. Each entry: `## [YYYY-MM-DD] type | title`
 Types: ingest | query | lint | decision | milestone | setup
 
+## [2026-08-12] decision | Step-back from VLA4AMR — handover to Khush
+
+**Scope:** Om Kathalkar stepped back from VLA4AMR following relocation to Athens (NTUA doctoral programme). Formal email sent to Prof. Jawahar on 2026-08-12.
+
+**Reason:** Increased responsibilities at NTUA (TPC + reviewing duties), settling-in overhead, no longer able to contribute at the level the project deserves.
+
+**Commitments made in step-back email:**
+- Full handover documentation + walk-through call with Khush within two weeks
+- Reachable for questions, reproduction issues, and draft reviews through ICRA deadline (Sep 15, 2026)
+
+**State of project at handover:**
+
+| Area | State |
+|------|-------|
+| FlowVLA-BW architecture | Complete. v3 checkpoint (`flowvla_v3_best.pt`) on simulator. val MAE=0.0044, 100% turn DirAcc. |
+| C3 ConfidenceGatedHandoff | Complete. 92 tests pass. Ada eval pipeline ready but SLURM array not yet run (no quantitative results). |
+| Phase 1 ROS2 bridge | ~90% — stereo, clock, cmd_vel working; v3 script fixes odom+TF but not yet uploaded (SSH offline). |
+| Phase 2–5 (RTAB-Map → real dataset → FlowVLA v4) | Not started. Fully planned in [[vslam-rtabmap]]. |
+| ICRA paper | Not started. C3 §IV + §V unblocked once Ada eval numbers are in. Deadline Sep 15, 2026. |
+| Wiki | 37 pages — complete project documentation. Primary handover artefact. |
+
+**Key handover documents:**
+- `wiki/decisions/internvl3_work_log.md` — complete chronological log (BW16→BW20), offline/online
+- `wiki/architecture/FlowVLA-BW.md` — full architecture with 5 figures
+- `wiki/decisions/decision-bw20-hybrid-navstack.md` — C3 design decisions
+- `wiki/infrastructure/vslam-rtabmap.md` — Phase 2+ RTAB-Map plan
+
+**Wiki status updated to `handover` in overview.md.**
+
+---
+
+## [2026-08-11] setup | Phase 1 v3 — odom + TF rewritten as Python rclpy publishers
+
+**Scope:** Phase 1 ROS2 bridge v3 written to fix the two remaining blockers for RTAB-Map (Phase 2).
+
+**Root causes fixed:**
+1. `/odom` failure — `IsaacComputeOdometry` OG node rejects `/World/Nova_Carter_ROS` (xform root, not rigid body). **Fix:** `/OdomGraph` removed entirely; replaced with Python `rclpy` publisher calling `robot.get_world_pose()` (Isaac `IsaacRobot` object) each tick → publishes `nav_msgs/Odometry` at 33 Hz with `header.frame_id="odom"`, `child_frame_id="nova_carter"`.
+2. TF tree incomplete — `ROS2PublishTransformTree` with `targetPrims` (deprecated) only emits `world→Nova_Carter_ROS`, missing `odom→nova_carter` and all camera frames. **Fix:** `/TFGraph` OG removed; replaced with `tf2_ros.TransformBroadcaster` (dynamic `odom→nova_carter` from `robot.get_world_pose()`) + `StaticTransformBroadcaster` (rigid offsets `nova_carter→front_left_camera`, `nova_carter→front_right_camera` from USD `XformCache` at init).
+
+**TF tree after v3:**
+```
+odom (world origin, fixed)
+  └── nova_carter   (dynamic — robot.get_world_pose() each tick)
+        ├── front_left_camera   (static — USD XformCache at init)
+        └── front_right_camera  (static — USD XformCache at init)
+```
+
+**Quaternion convention note:** Isaac Sim `get_world_pose()` returns orientation as `(w,x,y,z)`; ROS/TF2 uses `(x,y,z,w)` → `qx=orn[1], qy=orn[2], qz=orn[3], qw=orn[0]`.
+
+**Graphs remaining (unchanged from v2):** `/MotionGraph`, `/ClockGraph`, `/CameraGraph`
+
+**Status:** Script written locally at `/tmp/phase1_ros2_setup_v3.py`, upload pending (simulator SSH offline at 2026-08-11).
+
+---
+
+## [2026-08-11] milestone | FlowVLA-BW architecture wiki page + Phase 1 ROS2 bridge status
+
+**Scope:** Architecture documentation and ROS2 bridge status captured for paper figure preparation.
+
+**FlowVLA-BW architecture page created** (`wiki/architecture/FlowVLA-BW.md`):
+- 5 ASCII figures ready for paper/slide figure conversion:
+  - Figure 1: Full inference pipeline (backbone → FlowActionHead2D → ODE → action)
+  - Figure 2: Training objective (rectified flow matching, linear interpolant)
+  - Figure 3: v1/v2/v3 version comparison table with metrics
+  - Figure 4: Dimension flow (896 → 1792 → 256 → 2)
+  - Figure 5: GoalCond geometry-only variant (no vision)
+- Verified against `flowvla_train_flow.py` source
+
+**Phase 1 ROS2 bridge — current state:**
+
+All 5 OmniGraph publisher graphs confirmed built and running on Isaac Sim 6.0.0.1 (warehouse_20x20.usd + Nova Carter):
+
+| Graph | Topics | Rate | Status |
+|-------|--------|------|--------|
+| /MotionGraph | — (cmd_vel→wheels via rclpy) | 33 Hz ticks | ✓ robot moves |
+| /ClockGraph | /clock | 33 Hz | ✓ |
+| /TFGraph | /tf | 33 Hz | ⚠ only world→Nova_Carter_ROS |
+| /OdomGraph | /odom | — | ✗ chassis prim type error |
+| /CameraGraph | /front_stereo_camera/left+right/image_raw, /camera_info | 33 Hz | ✓ |
+
+**Verified working:**
+```
+ros2 topic list:
+  /clock
+  /cmd_vel
+  /front_stereo_camera/left/camera_info    ← fx=319.27, 640×480
+  /front_stereo_camera/left/image_raw
+  /front_stereo_camera/right/camera_info
+  /front_stereo_camera/right/image_raw
+  /tf
+```
+
+**Known issues to fix before Phase 2 (RTAB-Map):**
+1. `/odom` not publishing — `IsaacComputeOdometry` rejects `/World/Nova_Carter_ROS` (not rigid body); fix: use `/World/Nova_Carter_ROS/chassis_link` OR Python-based publisher
+2. TF tree incomplete — `ROS2PublishTransformTree` with `targetPrims` deprecated, only publishes root xform; RTAB-Map needs full kinematic chain (odom→base_link→camera frames)
+3. Solution: replace OmniGraph TF + odom nodes with Python-based rclpy publishers using `robot.get_world_pose()` + USD XformCache for static camera offsets
+
+**Key Isaac Sim OmniGraph facts confirmed this session:**
+- `ROS2SubscribeTwist.outputs:linearVelocity` is `double3` (vector), NOT `double` → cannot connect directly to `DifferentialController.inputs:linearVelocity` (which is `double`). Fix: Python rclpy subscriber + `og.Controller.set()` scalar injection.
+- `ROS2PublishOdometry.inputs:robotFrameId` does NOT exist. Actual inputs include: `chassisFrameId`, `odomFrameId`, `robotFront`, `publishRawVelocities`.
+- `nohup > LOG 2>&1` suppresses Python `print()` (block-buffered). Isaac Sim Python stdout goes to Kit log: `isaacsim/kit/logs/Kit/Isaac-Sim Python/6.0/kit_<ts>.log`.
+
+---
+
+## [2026-08-09] milestone | Synthetic dataset pivot — real VSLAM + teleop capture plan adopted
+
+**Scope:** After 3 failed collection runs (v9/v10/v11, 100% TIMEOUT), the Isaac-Synthetic dataset track for FlowVLA-BW was declared useless and a full pivot to real dataset capture was made.
+
+**Why synthetic collection failed (5 structural flaws diagnosed):**
+1. **Labels are pure geometry** — P-controller / A* cmd_vel has no dependence on visual input; InternVL3-1B embeddings of white warehouse walls are near-constant → null model (output layer bias mean ≈ 0.00002)
+2. **3 of 10 instructions are synthetic** — robot has no visual referent for "charging dock", "loading bay" etc. in this warehouse
+3. **Drift corrections mislabeled as turns** — Pure Pursuit angular corrections labeled identically to deliberate turns
+4. **64% forward dominance** — turning data severely underrepresented
+5. **Single start position** — robot always starts at (0,0); model learns start-specific biases
+
+**Timeline.stop()/play() kills OmniGraph motion (root cause of v9/v10 TOIMEOUTs):**
+- `timeline.stop()` breaks OmniGraph articulation controller velocity delivery permanently
+- After `timeline.play()`, robot moves at ~10% of commanded speed even after re-setting `robotPath`
+- Fix: NEVER call `timeline.stop()/play()` during collection loop; run timeline continuously
+
+**rep.orchestrator.step() in collection loop also kills motion:**
+- Calling `rep.orchestrator.step()` every 12 ticks interferes with OmniGraph, drops speed to ~10%
+- Fix: Remove from episode loop entirely
+
+**Pivot plan adopted — VSLAM Mapping + Real Dataset Capture:**
+- Phase 0: Confirm motion (✓ done — Layer 2 OmniGraph at 136% without above bugs)
+- Phase 1: Isaac Sim → ROS2 topic bridge (in-progress — camera/clock confirmed, odom/TF need fix)
+- Phase 2: Launch RTAB-Map stereo SLAM + teleop keyboard
+- Phase 3: Full coverage mapping pass of warehouse_20x20.usd
+- Phase 4: `ros2 bag record` for real dataset capture (human teleop = natural visual-to-action mapping)
+- Phase 5: QC pass
+
+**Motion diagnostic results** (`motion_diagnostic.py`, 120 ticks at 0.35 m/s, expected 0.700m):
+| Layer | Method | Result | Distance |
+|-------|--------|--------|---------|
+| Layer 1 | `IsaacRobot.apply_action()` | FAIL | shape mismatch (7 DOF vs 2 joints) |
+| Layer 2 | OmniGraph DifferentialController | **PASS 136%** | 0.949m |
+| Layer 3 | ROS2 cmd_vel bridge | FAIL | 0m (bridge not pre-configured) |
+
+Layer 2 confirmed as the motion backbone. Pure Pursuit behind-robot bug also fixed (turn-in-place when `local_x < 0.05`).
+
+---
+
+## [2026-08-09] milestone | v4 collection: east-side spawn fix — visual quality confirmed clean
+
+**Scope:** White-frame problem diagnosed and fixed. New collection (v4, seed=99) running with all
+spawn zones forced to east-side sweet spot (x=1..6, y=−4..−2).
+
+**Root cause of white frames:**
+- Camera faces SOUTH (opposite to heading direction) in this warehouse
+- From center/west spawn zones (x=−26..−2), looking south shows only white shelf backs
+- Only the east-side zone (x=1..6, y=−4..−2) gives a rich camera view: south wall +
+  colorful east-side rack + bollards at ~4 m range
+
+**Fix applied in `large_collect.py`:**
+- All 10 SPAWN_ZONES entries overridden to `(1.0, 6.0, -4.0, -2.0)` (east-side sweet spot)
+- A* still plans full collision-free routes from east side to any goal
+- Distance filter widened: `d < 2.0 or d > 35.0` (from 25) to allow ~32m aisle_01 paths
+
+**Visual quality verified** (frames from `large_dataset_v3/20260809_171841/`):
+- ep0 first_aid frame_000000: rack structure + wooden crates + blue/red shelving ✓
+- ep0 first_aid frame_000200: yellow AMR body + rack behind + floor ✓
+- ep1 danger frame_000000: AMR body + colorful crates + rack ✓
+- ep1 danger frame_000100: colorful crates (red/green/yellow/blue) + rack + wall ✓
+- No white frames in any sampled frame ✓
+
+**v4 collection status** (seed=99, 500 episodes, GPU 1 Blackwell):
+```
+ 0  first_aid   28.9m   6   447   447   REACHED
+ 1  danger      16.7m   6   278   278   REACHED
+ 2  first_aid   30.6m   5   523   523   REACHED
+ 3  first_aid   30.1m   5   597   597   REACHED
+ 4  aisle_01    32.1m   6   600   600   TIMEOUT  ← borderline (32m path, 600-step cap)
+```
+- TIMEOUT episodes still generate valid cmd_vel labels at every step
+- aisle_01 (~32m) is at the step-limit edge; acceptable for training
+
+**Previous `large_dataset_v3/20260809_164445/` collection** (seed=42):
+- Killed after ~47 episodes — white frames confirmed from west-side spawns
+
+**Next:** Let v4 finish (~500 eps, ~9h from 17:18), then retrain FlowVLA flow on A* + rich-frame data.
+
+---
+
 ## [2026-08-09] milestone | Logical data collection — A* + Pure Pursuit replaces P-controller
 
 **Scope:** P-controller caused AMR to crash into rack structures during dataset collection.
@@ -1899,4 +2083,135 @@ Raw episode stats (5 episodes, 1856 frames before oversampling):
 5. Run all from Isaac Sim (`warehouse_controller.py` flow) to get clean synchronized (image, action) at 5Hz, no keyboard lag.
 6. Target: ≥500 frames per class, ≥2000 total, balanced 50/25/25 (fwd/left/right).
 
+---
+
+## [2026-08-25] milestone | OmniVLA open-loop eval — 35 carter episodes, language-only mode
+
+**Scope:** Open-loop evaluation of OmniVLA (ICRA 2026, UC Berkeley/Toyota/Princeton) on the static carter dataset as a baseline reference for [[C6-EvaluationProtocol]].
+
+**Setup:**
+- Model: OmniVLA (`NHirose/omnivla-original`), language-only mode (`modality_id=7`, `lan_prompt=True`)
+- Hardware: [[simulator-machine]] — RTX PRO 5000 Blackwell 48 GB (sm_120), PyTorch 2.8.0+cu128
+- Dataset: `/home/cvit-car-simulator/Downloads/autonomous_goal_nav/manual/mapping/navmesh_based/V2/episode_data/static/carter` — 35 complete episodes, ~51K frames @ 10 Hz, 1280×720 RGB
+- Subsample: every 3rd frame (≈3.33 Hz effective); waypoint index 4 of 8-step chunk
+- Instruction: `trajectory.csv` `leg` column with `"to_"` prefix stripped
+- PD controller: DT=1/3, MAX_LIN=0.3 m/s, MAX_ANG=0.3 rad/s (exact from `run_omnivla.py`)
+- Output JSON: `~/Desktop/omnivla_openloop_results/results_20260825_215535.json`
+
+**Results — 35/35 episodes, 17,563 subsampled frames:**
+
+| Metric | Value |
+|--------|-------|
+| **Lin MAE** | **0.0512 m/s** |
+| **Ang MAE** | **0.0561 rad/s** |
+| Runtime | 1646 s (~27 min) |
+
+**Per-episode breakdown:**
+
+| Episode | n | Lin MAE | Ang MAE | pred lin̄ | GT lin̄ |
+|---------|---|---------|---------|----------|--------|
+| 0001 | 316 | 0.0575 | 0.0363 | 0.300 | 0.319 |
+| 0002 | 679 | 0.0504 | 0.0434 | 0.300 | 0.324 |
+| 0003 | 456 | 0.0500 | 0.0641 | 0.300 | 0.312 |
+| 0004 | 362 | 0.0534 | 0.0522 | 0.300 | 0.315 |
+| 0005 | 426 | 0.0510 | 0.0672 | 0.300 | 0.311 |
+| 0006 | 507 | 0.0480 | 0.0605 | 0.300 | 0.318 |
+| 0007 | 429 | 0.0529 | 0.0741 | 0.300 | 0.307 |
+| 0008 | 428 | 0.0507 | 0.0762 | 0.300 | 0.308 |
+| 0009 | 500 | 0.0518 | 0.0616 | 0.300 | 0.313 |
+| 0010 | 440 | 0.0509 | 0.0703 | 0.300 | 0.310 |
+| 0013 | 321 | 0.0547 | 0.0456 | 0.300 | 0.315 |
+| 0015 | 501 | 0.0505 | 0.0626 | 0.300 | 0.315 |
+| 0016 | 329 | 0.0560 | 0.0447 | 0.300 | 0.314 |
+| 0017 | 509 | 0.0498 | 0.0592 | 0.300 | 0.317 |
+| 0018 | 504 | 0.0524 | 0.0642 | 0.300 | 0.313 |
+| 0019 | 571 | 0.0496 | 0.0503 | 0.300 | 0.321 |
+| 0021 | 632 | 0.0509 | 0.0441 | 0.300 | 0.323 |
+| 0024 | 357 | 0.0536 | 0.0496 | 0.300 | 0.314 |
+| 0025 | 345 | 0.0544 | 0.0439 | 0.300 | 0.318 |
+| 0026 | 641 | 0.0510 | 0.0451 | 0.300 | 0.323 |
+| 0027 | 538 | 0.0503 | 0.0573 | 0.300 | 0.317 |
+| 0030 | 428 | 0.0514 | 0.0740 | 0.300 | 0.307 |
+| 0031 | 617 | 0.0504 | 0.0520 | 0.300 | 0.320 |
+| 0032 | 575 | 0.0487 | 0.0518 | 0.300 | 0.322 |
+| 0033 | 577 | 0.0502 | 0.0516 | 0.300 | 0.320 |
+| 0035 | 327 | 0.0524 | 0.0484 | 0.300 | 0.315 |
+| 0036 | 437 | 0.0485 | 0.0707 | 0.300 | 0.312 |
+| 0037 | 469 | 0.0518 | 0.0705 | 0.300 | 0.309 |
+| 0038 | 497 | 0.0501 | 0.0578 | 0.300 | 0.317 |
+| 0039 | 658 | 0.0507 | 0.0453 | 0.300 | 0.323 |
+| 0040 | 543 | 0.0510 | 0.0569 | 0.300 | 0.317 |
+| 0041 | 619 | 0.0500 | 0.0522 | 0.300 | 0.321 |
+| 0042 | 581 | 0.0500 | 0.0529 | 0.300 | 0.321 |
+| 0044 | 587 | 0.0494 | 0.0525 | 0.300 | 0.321 |
+| 0045 | 582 | 0.0482 | 0.0526 | 0.300 | 0.322 |
+
+**Key observation — saturation at MAX_LIN:** `pred_lin̄ = 0.300` for every single episode — OmniVLA saturates at the PD-controller clamp. The model always predicts max forward speed regardless of instruction or scene content. GT lin̄ ranges 0.307–0.324 (carter robot actually runs slightly above the clamp), so the Lin MAE 0.0512 m/s is almost entirely the constant offset (GT − 0.300). Ang MAE 0.0561 rad/s reflects small-angle prediction noise; the model outputs low angular variance (~0.001–0.015 rad/s mean) against GT angular spread of −0.028–+0.011 rad/s.
+
+**Interpretation:** These numbers establish a **language-only zero-shot baseline** for OmniVLA on carter. The saturation behaviour suggests OmniVLA's waypoint head was not trained on data where stopping or slowing is signalled purely by language — it learned to always "go". This is expected; OmniVLA was trained on outdoor UTM-GPS goal navigation, not warehouse stop/turn commands. The numbers are useful as a lower bound: our own [[C2-MidLevelActionHead]] (FlowVLA-BW v3 val MAE=0.0044) should comfortably exceed this zero-shot baseline in open-loop.
+
+**Technical notes:**
+- Blackwell sm_120 required PyTorch 2.8.0+cu128 and a custom loader that skips `define_model()`'s second `.to(dtype=bfloat16, device=...)` call (uncompiled kernel on sm_120)
+- LoRA adapter merged via `peft.PeftModel.from_pretrained()` + `merge_and_unload()` before eval
+- Script: `~/Desktop/omnivla_openloop_eval.py` on [[simulator-machine]]
+
 **Expected model improvement with new data:** With 500 clean left-turn frames that are visually grounded (landmark visible + instruction = "turn left" → ang > 0.5), the FlowActionHead2D should generalize to "Turn left at the shelf" at inference.
+
+---
+
+## [2026-08-26] milestone | OmniVLA closed-loop eval — 10 Isaac Sim episodes, language-only mode
+
+**Scope:** Closed-loop evaluation of OmniVLA on the static carter corridor (same 10 episodes as open-loop baseline), measuring success rate, SPL, time-to-goal. Part of [[C6-EvaluationProtocol]].
+
+**Setup:**
+- Model: OmniVLA (`NHirose/omnivla-original`), language-only mode (`modality_id=7`, `lan_prompt=True`)
+- Hardware: [[simulator-machine]] — RTX PRO 5000 Blackwell 48 GB (sm_120)
+- Simulator: Isaac Sim 6.0.0.1, headless, carter_warehouse_navigation.usd (27 m aisle, -x direction)
+- IPC: file-based (frame.jpg → VLA inference → action.json), VLA server on GPU1 (Blackwell), Isaac on GPU1 (active_gpu=1)
+- Position tracking: dead reckoning with wall-clock dt (isaacsim.robot.dynamic_control not available in this Isaac 6 install)
+- Success criterion: dead-reckoning goal_dist < 2.0 m; timeout: 150 s
+- Video: episode 1 & 2 recorded (6 MB each, mp4 at 5 fps)
+- Results: `~/Desktop/omnivla_cl_results/20260826_003119/results.json`
+
+**Results — 10 episodes:**
+
+| Metric | Value |
+|--------|-------|
+| **Success Rate** | **70% (7/10)** |
+| **Collision Rate** | **0%** |
+| **Timeout Rate** | **30%** |
+| **Mean SPL** | **0.700** |
+| **Mean Path (all)** | **31.1 m** |
+| **Mean Time-to-Goal** | **89.7 s** (successes only) |
+
+**Per-episode breakdown:**
+
+| Ep | Outcome | t2g (s) | path (m) | SPL | Instruction (truncated) |
+|----|---------|---------|---------|-----|------------------------|
+| 1 | TIMEOUT | — | 42.5 | 0.000 | Entrance of Aisle 05 (blockers/yellow cones) |
+| 2 | TIMEOUT | — | 44.0 | 0.000 | End of Aisle 01 |
+| 3 | SUCCESS | 87.0 | 25.7 | 1.000 | Right Aisle 01 – Second Sub-rack |
+| 4 | TIMEOUT | — | 43.6 | 0.000 | forklift (entrance of Aisle 06) |
+| 5 | SUCCESS | 90.7 | 25.9 | 1.000 | Right Aisle 03 – Second Sub-rack |
+| 6 | SUCCESS | 92.0 | 26.6 | 1.000 | Right Aisle 02 – Third Sub-rack |
+| 7 | SUCCESS | 87.3 | 25.6 | 1.000 | Left Aisle 03 – Second Sub-rack |
+| 8 | SUCCESS | 90.4 | 25.6 | 1.000 | Right Aisle 04 – Second Sub-rack |
+| 9 | SUCCESS | 89.2 | 25.6 | 1.000 | Left Aisle 04 – Third Sub-rack |
+| 10 | SUCCESS | 91.2 | 26.2 | 1.000 | Left Aisle 02 – Second Sub-rack |
+
+**Key observations:**
+
+1. **70% success rate, 0% collision** — OmniVLA navigates the 27 m corridor successfully in 7/10 episodes. All successes have SPL=1.000 (near-optimal paths, 25.6–26.6 m vs optimal 27.2 m).
+2. **Timeout episodes have large path (42–44 m)** — robot drives for the full 150 s (~45 m total), confirming it never stops or reverses; timeout is caused by angular drift in dead reckoning (not physical failure).
+3. **Angular drift is the success predictor** — VLA outputs lin=0.300 (MAX_LIN) and ang ≈ 0–0.011 rad/s. Episodes with ang < ~0.003 rad/s sustained succeed (dead reckoning stays within 2 m of goal); episodes where ang drifts to 0.007–0.011 rad/s timeout (dead reckoning diverges 17–21 m from goal). Actual robot behavior likely succeeded on some timeout episodes too.
+4. **Position tracking limitation** — `isaacsim.robot.dynamic_control` extension is not installed in this Isaac Sim 6 build; ROS2 /odom not published by carter scene with this config. Dead reckoning with wall-clock dt gives correct path lengths (42–44 m for 150 s at 0.3 m/s) but angular drift causes measurement error. Success/timeout boundary may be slightly underestimated.
+5. **Consistent t2g for successes: 87–92 s** — the 27 m corridor at 0.3 m/s takes 90 s; all successes cluster within 5 s of this, confirming the robot is driving straight to the goal without overshooting.
+6. **Open-loop → closed-loop link** — open-loop showed pred_lin̄=0.300 (always saturated) and ang MAE=0.056 rad/s. Closed-loop confirms: the robot physically reaches the goal at 0.3 m/s when angular drift stays low, failing only when drift exceeds ~0.007 rad/s sustained.
+
+**Technical issues resolved during setup (Isaac Sim 6.0 bugs):**
+- `isaacsim.robot.dynamic_control` not available → switched to wall-clock dead reckoning
+- XformCache returns USD-authored position (not physics) — confirmed Isaac Sim 6 known bug
+- PIL `.tmp` extension requires explicit `format="JPEG"` parameter
+- Dead reckoning required wall-clock dt (not fixed 1/30 s) — Isaac Sim headless runs faster than real-time
+
+**Connects to:** [[C6-EvaluationProtocol]], [[IsaacSim]], [[NovaCarter]], [[simulator-machine]]

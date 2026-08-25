@@ -1,15 +1,47 @@
 # VLA4AMR — Project Overview
 
 **Type:** overview
-**Status:** active
-**Last updated:** 2026-08-07 (C3 hybrid nav stack Phases 5–9 complete; 92-test suite; Ada HPC eval pipeline ready; wiki updated)
-**Related:** [[C1-AdaCoT]], [[C2-MidLevelActionHead]], [[C3-ConfidenceGatedHandoff]], [[IsaacSim]], [[NovaCarter]], [[simulator-machine]], [[Nav-AMR-WH]], [[Isaac-Synthetic]]
+**Status:** handover
+**Last updated:** 2026-08-12 (Om stepping back; handover initiated)
+**Related:** [[C1-AdaCoT]], [[C2-MidLevelActionHead]], [[C3-ConfidenceGatedHandoff]], [[FlowVLA-BW]], [[IsaacSim]], [[NovaCarter]], [[simulator-machine]], [[Nav-AMR-WH]], [[Isaac-Synthetic]]
 
 ## Summary
 
 VLA4AMR applies Vision-Language-Action models to Autonomous Mobile Robot navigation in industrial warehouse settings. The core thesis: current VLA models are black-box reactive policies with no reasoning or memory — unacceptable for industrial AMR deployment. We address this with six interlocking contributions targeting ICRA 2027.
 
-## Current status (BW19 — Aug 2, 2026)
+## Handover status (2026-08-12)
+
+Om Kathalkar has stepped back from VLA4AMR following relocation to Athens (NTUA doctoral programme). A formal step-back email was sent to Prof. Jawahar on 2026-08-12. Handover is to **Khush**, targeting completion within two weeks. Om remains reachable for questions, reproduction issues, and draft reviews through the ICRA deadline (Sep 15, 2026).
+
+**Handover scope:**
+
+| Item | Owner → | Status |
+|------|---------|--------|
+| FlowVLA training pipeline (`flowvla_train_flow.py`, `flowvla_train_goalcond.py`) | Om → Khush | ⏳ Walk-through call pending |
+| Isaac Sim environment + Nova Carter setup | Om → Khush | ⏳ Walk-through call pending |
+| Phase 1 ROS2 bridge v3 (upload + verify `/odom` + TF) | Om → Khush | ⏳ SSH offline 2026-08-11 |
+| Phase 2–5 SLAM + dataset capture plan | Om → Khush | ⏳ Documented in [[vslam-rtabmap]] |
+| Current checkpoints (`flowvla_v3_best.pt`, `goalcond_best.pt`) | Simulator | ✅ On simulator + paths documented |
+| C3 eval pipeline (Ada SLURM array) | Om → Khush | ⏳ Scripts ready, not yet run |
+| ICRA paper draft | Shared | ⏳ Sep 15 deadline |
+| This wiki | Om (complete) → Khush (read) | ✅ 37 pages, all experiments logged |
+
+**Primary handover document:** `wiki/decisions/internvl3_work_log.md` — complete chronological log of all InternVL3-1B work (BW16–BW20), OFFLINE/ONLINE labelled.
+
+**Immediate unblocked tasks for Khush:**
+
+1. Upload Phase 1 v3 script (already written, on Om's machine at `/tmp/phase1_ros2_setup_v3.py`):
+   ```bash
+   scp phase1_ros2_setup_v3.py cvit-car-simulator@10.2.141.227:~/Desktop/nav_stack/sim/phase1_ros2_setup.py
+   bash ~/Desktop/nav_stack/sim/phase1_ros2_setup.sh --bg
+   ros2 topic hz /odom          # should be ~33 Hz
+   ros2 run tf2_ros tf2_echo odom nova_carter
+   ```
+2. Phase 2 RTAB-Map: `rtabmap_ros stereo_odometry` on `/front_stereo_camera/{left,right}/` — see [[vslam-rtabmap]]
+3. Ada HPC C3 eval: `bash ~/Desktop/nav_stack/sim/sync_to_ada.sh` then `sbatch run_episode_ada.slurm` — see [[C3-ConfidenceGatedHandoff]]
+4. ICRA paper: C3 §IV + §V unblocked once Ada eval numbers are in
+
+## Current status (BW20 — Aug 11, 2026)
 
 | Item | Status |
 |------|--------|
@@ -67,6 +99,17 @@ VLA4AMR applies Vision-Language-Action models to Autonomous Mobile Robot navigat
 | C3 Phase 7 — Ada HPC headless batch eval pipeline | ✅ Done (2026-08-07 — run_episode_headless.py + run_episode_ada.slurm (array=0-19) + sync_to_ada.sh + aggregate_phase7.py) |
 | C3 Phase 8 — Paper comparison table | ✅ Done (2026-08-07 — run_eval_suite.py: Hybrid vs Pure VLA vs Pure A*; outputs .tex/.txt/.json; 25 tests pass) |
 | C3 Phase 9 — Wiki write-up | ✅ Done (2026-08-07 — C3 page rewritten; decision-bw20-hybrid-navstack.md; log + overview updated) |
+| GoalCond ActionRegressor (text + geometry, no vision) | ✅ Done (2026-08-08 — 93.3% SR on 10 DynaNav targets; val MAE lin=0.0019 ang=0.0004; `goalcond_best.pt`) |
+| Large dataset collection — A* + Pure Pursuit (30,523 frames) | ✅ Done (2026-08-08 — 83/100 episodes REACHED; white-frame fix; east-side spawns only) |
+| FlowVLA flow_v2 training on large_dataset_v2 | ✅ Done (2026-08-09 — loss=0.170749; MAE lin=0.00634, ang=0.01853; `flowvla_flow_v2_best.pt`) |
+| Synthetic dataset pivot — real VSLAM + ros2 bag capture plan | ✅ Done (2026-08-09 — 5 structural flaws diagnosed; timeline.stop()/play() + rep.orchestrator.step() root causes confirmed) |
+| Isaac Sim motion diagnostic (layered isolation test) | ✅ Done (2026-08-09 — Layer 2 OmniGraph: 136% speed; Layer 1 fail (DOF mismatch); Layer 3 fail (bridge unconfigured)) |
+| Phase 1 ROS2 bridge — stereo camera + clock topics | ✅ Done (2026-08-10 — /clock, /left+right image_raw, /camera_info, /tf all at 33 Hz; 5 OmniGraph graphs; `phase1_ros2_setup.py`) |
+| Phase 1 ROS2 bridge — /odom + full TF tree | ⏳ v3 script written (2026-08-11), upload pending (simulator SSH offline) |
+| FlowVLA-BW architecture page | ✅ Done (2026-08-11 — `wiki/architecture/FlowVLA-BW.md`; 5 figures for paper) |
+| InternVL3 complete work log (BW16→BW20) | ✅ Done (2026-08-11 — `wiki/decisions/internvl3_work_log.md`; 17 sections, offline/online labelled) |
+| Step-back email to Prof. Jawahar | ✅ Done (2026-08-12) |
+| Handover documentation | ✅ Wiki (37 pages) — handover call with Khush pending |
 
 ## FlowVLA-BW v2 Results (2026-08-02)
 
@@ -286,13 +329,22 @@ Fine-tuned OpenVLA-7B (LoRA rank=32) evaluated on 300 val samples from bw05_data
   - **Demo video 2 (local):** `~/Downloads/vla4amr_demo/flowvla_v3_blackwell_20260806_114635.mp4`
   - **Action log (local):** `~/Downloads/vla4amr_demo/flowvla_v3_actions_20260805_163001.jsonl`
 - **BW20 dataset collection (open):** v3 dataset has 5 structural flaws (3 synthetic instructions, drift corrections mislabeled as turns, no visual-trigger grounding, 64% forward dominance, single start position). Protocol defined — target ≥150 episodes, ≥2000 frames, balanced, with operator-typed per-segment instructions. See log [2026-08-04] investigation for full spec.
-- **Next priorities (BW20+):**
-  1. **Run Phase 7 SLURM array on Ada:** `bash ~/Desktop/nav_stack/sim/sync_to_ada.sh` then `sbatch ~/nav_stack/sim/run_episode_ada.slurm` — get first quantitative paper numbers (heading err, ADE, FDE) for 20 BW17 windows
-  2. **Run Phase 8 eval suite on Ada:** `python3 ~/nav_stack/eval/run_eval_suite.py ...` — produces `eval_comparison.tex` (Table 1 C3 column)
-  3. **Phase 9 TIC-VLA baseline:** re-run Phase 7 with TIC-VLA paper checkpoint (`--phase9-dir`) → fills 4th column of comparison table (C2 vs C3)
-  4. **BW20 dataset collection:** ≥150 balanced episodes with operator-typed per-segment instructions (protocol in log [2026-08-04]) → retrain FlowVLA-BW v4 → expect instruction-conditioned turning
-  5. **Closed-loop success rate:** run `run_episode_simulator.sh` on ≥10 start/goal pairs → aggregate success rate (reach within 1.0m of goal)
-  6. **ICRA paper draft:** C3 §IV (method) + §V (eval) are unblocked — all numbers in `eval_comparison.tex`. Deadline **Sep 15, 2026** (~5.5 weeks remaining)
-  - **C3 hybrid stack:** `~/Desktop/nav_stack/` on simulator. Launch: `bash ~/Desktop/nav_stack/sim/run_episode_simulator.sh [x0 y0 x1 y1]`
-  - **Ada eval:** `bash ~/Desktop/nav_stack/sim/sync_to_ada.sh` from simulator, then `sbatch` on Ada
-  - **Paper table:** `python3 ~/nav_stack/eval/run_eval_suite.py --results-dir ~/logs/phase7 --data-root /ssd_scratch/om.kathalkar/bw17_dynav --grid-dir /ssd_scratch/om.kathalkar/nav_stack_grid`
+- **Next priorities for Khush (as of 2026-08-12 — handover):**
+
+  **IMMEDIATE — Phase 1 → 2 unblock:**
+  1. Upload `phase1_ros2_setup_v3.py` to simulator → verify `/odom` at 33 Hz and full TF tree (`odom→nova_carter→front_*_camera`)
+  2. Phase 2: `rtabmap_ros stereo_odometry` on stereo topics — confirm map building in warehouse_20x20.usd
+  3. Phase 3: Full coverage mapping pass → save `warehouse_20x20.db`
+  4. Phase 4: `ros2 bag record` during teleop → real FlowVLA-BW v4 training data
+  5. Phase 5: QC + retrain FlowVLA-BW v4
+
+  **PAPER — unblocked:**
+  6. Ada SLURM C3 eval: `bash ~/Desktop/nav_stack/sim/sync_to_ada.sh` → `sbatch run_episode_ada.slurm` (array=0-19)
+  7. Phase 8 eval suite: `run_eval_suite.py` → `eval_comparison.tex` (Table 1 C3 column)
+  8. ICRA paper draft — deadline **Sep 15, 2026**
+
+  **Reference commands:**
+  - Phase 1 bridge: `bash ~/Desktop/nav_stack/sim/phase1_ros2_setup.sh --bg`
+    - Log: `/tmp/phase1_ros2_setup.log`; Kit log: `isaacsim/kit/logs/Kit/Isaac-Sim Python/6.0/kit_<ts>.log`
+  - C3 episode runner: `bash ~/Desktop/nav_stack/sim/run_episode_simulator.sh [x0 y0 x1 y1]`
+  - Ada sync + submit: `bash ~/Desktop/nav_stack/sim/sync_to_ada.sh` then `sbatch run_episode_ada.slurm`

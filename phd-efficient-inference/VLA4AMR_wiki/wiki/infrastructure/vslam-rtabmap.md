@@ -2,7 +2,7 @@
 
 **Type:** infrastructure
 **Status:** active
-**Last updated:** 2026-06-24
+**Last updated:** 2026-08-11
 **Related:** [[simulator-machine]], [[C3-ConfidenceGatedHandoff]], [[C6-EvaluationProtocol]], [[NovaCarter]], [[IsaacSim]]
 
 ## Summary
@@ -63,11 +63,39 @@ RTAB-Map is launched automatically as a subprocess inside `bw09_isaac_sim_ros2.p
 6. TF extrapolation error — timestamp mismatch (sim time vs wall clock) fixed by publishing `/clock`
 7. `odom` topic mismatch — stereo_odometry publishes to `/odom`, rtabmap needs `/rtabmap/odom`
 
+## Phase 1 v3 TF Architecture (BW20 bridge — `phase1_ros2_setup.py`)
+
+The BW20 bridge (v3) publishes the full TF tree required by RTAB-Map without relying on deprecated OmniGraph nodes:
+
+```
+odom (world origin, fixed)
+  └── nova_carter     ← tf2_ros.TransformBroadcaster, dynamic, robot.get_world_pose() at 33 Hz
+        ├── front_left_camera   ← StaticTransformBroadcaster, USD XformCache offset at init
+        └── front_right_camera  ← StaticTransformBroadcaster, USD XformCache offset at init
+```
+
+**RTAB-Map launch config for this bridge:**
+```yaml
+use_sim_time: true          # consumes /clock from /ClockGraph
+frame_id: nova_carter        # base_link
+odom_frame_id: odom
+left_image_topic:  /front_stereo_camera/left/image_raw
+right_image_topic: /front_stereo_camera/right/image_raw
+left_camera_info_topic:  /front_stereo_camera/left/camera_info
+right_camera_info_topic: /front_stereo_camera/right/camera_info
+subscribe_stereo: true
+approx_sync: true            # left/right timestamps can differ ~1 frame
+```
+
+**Previous approach (v1/v2, broken):**
+- `ROS2PublishTransformTree` with `targetPrims=["/World/Nova_Carter_ROS"]` — deprecated; only emits one static xform, no kinematic chain
+- `IsaacComputeOdometry` with chassis prim = robot root (`/World/Nova_Carter_ROS`) — fails (not a rigid body); must use `/World/Nova_Carter_ROS/chassis_link` OR Python fallback
+
 ## Open Questions
 
-- Can Carter be moved via physics (ArticulationController) instead of session layer to get smoother motion and TF tree?
+- Does RTAB-Map stereo work with `approx_sync=true` at 33 Hz in Isaac Sim, or is frame jitter an issue?
 - Can the RTAB-Map map DB be converted to a Nav2 costmap for planning?
-- Does the 12 cm baseline assumption match actual Nova Carter USD camera positions?
+- Actual Nova Carter hawk baseline in USD: assumed ~12 cm — verify from static TF printed at startup.
 
 ## Sources
 
