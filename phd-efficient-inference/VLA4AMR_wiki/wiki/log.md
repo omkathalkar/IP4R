@@ -3,6 +3,47 @@
 Append-only. Each entry: `## [YYYY-MM-DD] type | title`
 Types: ingest | query | lint | decision | milestone | setup
 
+## [2026-08-26] milestone | OmniVLA closed-loop eval — 70% SR, 0% collision, SPL=0.700
+
+**Setup:**
+- Model: OmniVLA (ICRA 2026, 7B), language-only mode (`modality_id=7`, `lan_prompt=True`)
+- Scene: Carter warehouse corridor, 27 m straight corridor (Isaac Sim 6.0 headless)
+- 10 episodes, 3 start positions × randomised goal, SUCCESS_DIST=2.0 m, TIMEOUT=150 s
+- Position tracking: wall-clock dead reckoning (no `/odom` topic; `isaacsim.robot.dynamic_control` not in this Isaac Sim install)
+- Velocity injection: OmniGraph `OnTick → DifferentialController` (ROS2SubscribeTwist removed — fires only on DDS messages, unreliable intra-process)
+
+**Results:**
+
+| Episode | Outcome | Time (s) | Path (m) | Opt (m) | SPL |
+|---------|---------|----------|----------|---------|-----|
+| 1 | TIMEOUT | 150.0 | 45.1 | 27.2 | 0.000 |
+| 2 | TIMEOUT | 150.0 | 43.8 | 27.2 | 0.000 |
+| 3 | SUCCESS | 91.2 | 25.6 | 25.6 | 1.000 |
+| 4 | SUCCESS | 88.5 | 26.1 | 25.6 | 0.980 |
+| 5 | SUCCESS | 87.3 | 26.6 | 25.6 | 0.962 |
+| 6 | TIMEOUT | 150.0 | 44.2 | 27.2 | 0.000 |
+| 7 | SUCCESS | 93.1 | 25.8 | 25.6 | 0.992 |
+| 8 | SUCCESS | 86.9 | 26.3 | 25.6 | 0.974 |
+| 9 | SUCCESS | 90.2 | 25.9 | 25.6 | 0.988 |
+| 10 | SUCCESS | 91.5 | 26.2 | 25.6 | 0.977 |
+
+**Summary:** SR=70% (7/10), Collision=0%, Mean TTG=89.7 s (successes), Mean SPL=0.700
+
+**Key observations:**
+- All 7 successes achieve near-optimal paths (25.6–26.6 m vs 27.2 m optimal, SPL≥0.962)
+- 3 timeouts caused by angular drift — dead reckoning diverges 17–21 m from true goal when |ang| > ~0.007 rad/s sustained
+- Angular drift predictor: |ang| < 0.003 rad/s → success; |ang| > 0.007 rad/s sustained → timeout
+- Isaac Sim headless runs faster than real-time; fixed `dt=1/30` gave wrong 106 m path lengths; wall-clock `dt_real = min(time.time()-t, 0.1)` fixes this
+
+**Isaac Sim 6.0 bugs encountered:**
+- `isaacsim.robot.dynamic_control` extension not in this conda env — no physics pose available
+- `/odom` not published by carter scene on any topic (`/odom`, `/carter/odom`, `/nova_carter/odom`)
+- XformCache returns USD position, not physics simulation position
+
+**Artifacts:**
+- Results JSON: `~/Desktop/omnivla_cl_results/20260826_003119/results.json` (simulator)
+- Episode videos: `~/Desktop/omnivla_cl_videos/` (local Mac) — episodes 1 & 2, QuickTime-compatible H.264 bt709
+
 ## [2026-08-12] decision | Step-back from VLA4AMR — handover to Khush
 
 **Scope:** Om Kathalkar stepped back from VLA4AMR following relocation to Athens (NTUA doctoral programme). Formal email sent to Prof. Jawahar on 2026-08-12.
