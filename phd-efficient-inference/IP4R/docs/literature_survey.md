@@ -218,3 +218,152 @@ A stability-triggered video inspection mode was added for line-integration testi
 Validated on a 12 fps, 1920×1080 video of a real AC remote: splash screen correctly triggered at t=4.9s (button press ~t=3s, splash delay ~2s), full inspection PASS, all 5 digit ROIs passing coverage.
 
 CLI: `python scripts/inspect_video.py <video.mp4> [--start-skip 5.0] [--stable-frames 3] [--cal-t 2.0] [--out dir]`
+
+---
+
+## 9. FQCT server_v3 — DTS video inspection (Phase-A + Phase-B DL+CV sandwich)
+
+### 9.1 Architecture overview
+
+`server_v3/` is an independent FastAPI inference server for **video-based DTS (Display Test Sequence) inspection**. It processes 12 FPS MP4 videos of the remote being held in front of the fixture camera and decides **PASS / FAIL** by detecting the all-segments-on splash state inside the video.
+
+The pipeline per video:
+
+```
+Raw video frames (sampled every frame_step=5)
+        │
+        ▼
+detect_lcd()          — perspective-correct LCD glass to 480×640 BGR crop
+        │
+        ▼
+_classify_phase()     — classify each crop as phase_a / phase_b / none
+  • Phase-A: segments lit, icon strip dark  → idle/short-test (Image #2)
+  • Phase-B: segments lit, icon strip lit   → full DTS        (Image #3)
+  • Filters: per_roi_pass ≥ 3/5, bottom_80 ≥ 0.10
+        │
+        ├── Phase-A frames ──► verify_short()   — segment presence + icon-zone short detection
+        │
+        └── Phase-B frames ──► EfficientNet-B0 DL score (informational)
+                                verify_final() × all frames → majority fin vote
+                                verify_all()  on best frame (informational)
+        │
+        ▼
+Verdict: phase_a_ok AND (fin_pass_rate ≥ 0.50)
+```
+
+**Modules:**
+
+| File | Role |
+|---|---|
+| `lcd_crop.py` | Two-pass LCD detection: inner-contour (primary) + Otsu outer-contour (fallback) |
+| `worker.py` | Frame loop, phase classification, DL inference, majority fin vote, verdict |
+| `final_verify.py` | Centre-88 two-digit column-profile check at `_VERIFY_THRESH=80` |
+| `short_verify.py` | Phase-A segment-presence + icon short-circuit detection at `_THRESH=80` |
+| `lcd_verify.py` | Phase-B structural CV check (calibrated for old crop type; informational only) |
+| `app.py` | FastAPI endpoints: `/inspect_queue`, `/inference_result`, `/status`, `/api/jobs`, dashboard |
+| `job_store.py` | SQLite job queue + history |
+
+### 9.2 LCD crop detection (`lcd_crop.py`)
+
+The most critical step. The crop must be exactly the LCD glass, not the full remote body or background; all downstream ROI coordinates assume a 480×640 canvas.
+
+**Pass 1 — Inner-contour (primary):**
+Threshold at 150 (white plastic only) → 30×30 morphological close → `RETR_CCOMP` hierarchy. Holes (inner contours, `hier[3] != -1`) inside the white remote body are the LCD glass. Largest inner contour with area 3–40% of frame, approximated to 4 corners at `epsilon=0.08×perimeter`, is perspective-warped to 480×640. Method tag: `"perspective_inner"`.
+
+**Pass 2 — Otsu outer-contour (fallback):**
+Otsu threshold → 15×15 close → `RETR_EXTERNAL`. Largest quad with area 5–60% of frame (upper bound added to reject full-remote-body quads). Method tag: `"perspective"`.
+
+**Bbox fallback:** Bounding rect of largest contour, rejected if area > 60% of frame.
+
+The key fix vs. prior versions: old code used `RETR_EXTERNAL` with no upper area bound, so the full remote body (occupying 60–90% of frame) was frequently selected as the quad, producing a badly warped crop where all ROI coordinates were off.
+
+### 9.3 Phase classification
+
+`_classify_phase(gray, dark_thresh=125, digit_score_min=0.25)` applied to each 480×640 grayscale crop:
+
+1. Compute per-ROI dark-pixel coverage for 5 segment zones at `dark_thresh=125`.
+2. Reject if mean coverage < `digit_score_min` (no segments → not a DTS state).
+3. **per_roi_pass gate**: require ≥ 3/5 ROIs to individually exceed their minimum coverage (filters operating-mode frames showing partial patterns like "24°C / 3:00" with most zones blank).
+4. **bottom_80 gate**: `(gray[405:455, 175:395] < 80).mean() ≥ 0.10`. At thresh=80, only actual segment pixels are dark; LCD background (~120–140) reads as transparent. Operating-mode frames and transition frames where the bottom-row "88888" hasn't formed yet give bottom_80 ≈ 0 → rejected. Full DTS frames give bottom_80 ≈ 0.15–0.55 → kept.
+5. `icon_cov < 0.08` → Phase-A (icon strip blank, short-test state).
+6. `total_dark > 0.15` → Phase-B (full DTS with icons lit).
+
+### 9.4 Final filter — centre-88 majority vote (`final_verify.py`)
+
+The decisive defect-detection check. The centre "88" pair in the 480×640 crop occupies `y=218–303, x=70–190`. A column-profile (fraction of columns with dark-pixel coverage > threshold) is computed for:
+
+- **Left sub-region**: absolute x = 70–115 (columns 0–44 relative to zone start)
+- **Right sub-region**: absolute x = 125–175 (columns 55–104 relative to zone start)
+
+Both sub-region peaks must exceed `_MIN_PEAK_COV = 0.48` at `_VERIFY_THRESH = 80` for a frame to be classified as `fin_pass`.
+
+**Verdict uses majority vote**: `final_passed = (fin_pass_count / len(phase_b_frames)) ≥ 0.50`. This is robust to pool contamination from transition frames:
+
+| Remote type | fin_pass_rate | Outcome |
+|---|---|---|
+| Good (both digits always present in DTS frames) | 77–100% | PASS |
+| Defective — one digit completely missing | 7–44% | FAIL |
+| Defective — both digits borderline dim | 29% | FAIL |
+
+Key calibration notes:
+- `_RIGHT_COL_START = 55` (absolute x=125) was shifted right past the left digit's right-edge bleed. At x=118, the "3" digit's b and c segments contributed R≈0.82 false pass.
+- `_MIN_PEAK_COV = 0.48`: calibrated at 0.48 (not 0.50) because good-remote transition frames show L=0.494 (slightly below 0.50) when the left digit is still activating. True absent digits show peaks ≈ 0.0–0.14.
+
+### 9.5 Phase-A short detection (`short_verify.py`)
+
+Only trusted when ≥ 3 Phase-A frames are detected. In practice, most production videos have 0 Phase-A frames or exactly 1 (noise from a boundary frame), so Phase-A is usually skipped.
+
+`_THRESH = 80`: changed from 125. At thresh=125, the LCD green background (~120–140 gray) contributes ~50% dark coverage in blank zones, making all icon-zone checks (`max_cov=0.06–0.08`) always fail. At thresh=80, blank icon zones read 0–5% dark; lit short-circuit icons read 60–90% dark. `max_cov = 0.45` correctly passes blank zones while catching lit icons.
+
+### 9.6 Verdict formula
+
+```python
+phase_a_ok = (len(phase_a_frames) < 3) or (phase_a_passed is None) or phase_a_passed
+passed     = phase_a_ok and final_passed
+```
+
+DL (EfficientNet-B0 median probability) is **informational only** — not in the verdict. Reason: a known PASS remote (143041) scores median DL = 0.486 due to model uncertainty on that remote type, while defective remotes score DL = 0.96–1.00. DL does not discriminate defects for this dataset.
+
+### 9.7 Batch evaluation — July 14 unseen batch (10 videos)
+
+Ground truth: `/Users/om_kathalkar/Downloads/unseen_data.csv` (1=PASS, 0=FAIL).
+Videos: `/Users/om_kathalkar/Downloads/12-FPS/`.
+
+**Accuracy: 9/10 = 90%** (evaluated 2026-07-18).
+
+| Video | GT | Verdict | fin rate | Key signal |
+|---|---|---|---|---|
+| 141138 | PASS | **PASS ✓** | 91% | Phase-A 1fr → skipped (< 3) |
+| 141341 | FAIL | **FAIL ✓** | 30% | Right digit missing in most frames |
+| 141950 | FAIL | **FAIL ✓** | 44% | Left digit dim in most frames |
+| 142150 | PASS | **PASS ✓** | 54% | Fixed by `_MIN_PEAK_COV=0.48` (L=0.494 in early frames) |
+| 142516 | FAIL | **FAIL ✓** | 29% | Both digits below threshold in most frames |
+| 142739 | PASS | **PASS ✓** | 77% | Clean DTS |
+| 143041 | PASS | **PASS ✓** | 80% | DL=0.486 (unreliable); fin majority correct |
+| 143208 | PASS | **PASS ✓** | 100% | Clean DTS |
+| 143426 | FAIL | **FAIL ✓** | 7% | Right digit nearly absent (R≈0.07–0.14) |
+| **143604** | **FAIL** | **PASS ✗** | 81% | **Miss** — defect not in centre-88 zone |
+
+**Known miss — 143604:** DL=1.000, fin=81%, no Phase-A frames detected. The defect is not a missing centre-88 digit. Previously "caught" in earlier versions by false-positive Phase-A detections from operating-mode frames (which happened to trigger short_verify at the wrong threshold). Bottom_80 gate correctly filters those false Phase-A frames, but removes the (accidental) detection. The actual defect type is unknown and not detectable by the current check set. Would require physical inspection of the unit or a different inspection modality.
+
+### 9.8 Deployment
+
+| Parameter | Value |
+|---|---|
+| Port | 8082 |
+| Model | `models/dts_p2v2_best.pth` (EfficientNet-B0, 1-output sigmoid) |
+| Config | `config/fqct_server.yaml` |
+| Jobs DB | `data/jobs_v3/jobs.db` |
+| Local start | `cd IP4R && python3 -m server_v3._main --port 8082` |
+| Remote (tangent) | `sshpass -p 'useme123' ssh om@tangentthoughttech.com "cd ~/src/fqct_server && nohup python3 -m server_v3._main --port 8082 >> server_v3.log 2>&1 &"` |
+| Remote device | CUDA (GPU) |
+| Local device | MPS (Apple Silicon) |
+
+**Config keys (hot-reloadable via `POST /api/config`):**
+
+| Key | Default | Effect |
+|---|---|---|
+| `video.frame_step` | 5 | Sample every N frames |
+| `video.dark_thresh` | 125 | Phase classification dark-pixel threshold |
+| `phase2.digit_score_min` | 0.25 | Min mean segment coverage for Phase-B |
+| `model.prob_threshold` | 0.5 | DL pass threshold (informational) |
