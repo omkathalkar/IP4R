@@ -2,9 +2,9 @@
 
 > **Project:** IP4R — AC-Remote LCD Splash-Screen Quality Control  
 > **Author:** Om Kathalkar  
-> **Version:** v04 (FQCT Server added)  
-> **Last updated:** July 2026  
-> **Status:** Production-ready · FQCT REST server live on tangent GPU machine
+> **Version:** v06 (Sep-09-2026 collapse diagnosed · register-once fix plan locked)  
+> **Last updated:** 2026-09-10  
+> **Status:** Active development · server_v4c live (9/10 Jul-14) · Sep-09 fix in progress (3/13 → target ≥11/13)
 
 ---
 
@@ -40,6 +40,13 @@
     - 14.4 [REST API Endpoints](#144-rest-api-endpoints)
     - 14.5 [Web Dashboard & Upload UI](#145-web-dashboard--upload-ui)
     - 14.6 [Live Deployment (Tangent Server)](#146-live-deployment-tangent-server)
+15. [v06 Development — Sep-09 Fix Plan](#15-v06-development--sep-09-fix-plan)
+    - 15.1 [Sep-09 Test Results & Root Cause](#151-sep-09-test-results--root-cause)
+    - 15.2 [Central Insight — The Architectural Bug](#152-central-insight--the-architectural-bug)
+    - 15.3 [Diagnostic Checklist](#153-diagnostic-checklist)
+    - 15.4 [Fix Priority Order](#154-fix-priority-order)
+    - 15.5 [Validation Protocol](#155-validation-protocol)
+    - 15.6 [Dataset Policy](#156-dataset-policy)
 
 ---
 
@@ -55,16 +62,18 @@ A GPU-accelerated inference server purpose-built for the 10-unit FQCT factory fl
 
 ### Key numbers
 
-| Metric | IP4R (golden-template) | FQCT Server (EfficientNet-B0) |
-|--------|----------------------|-------------------------------|
-| Detection rate | **92.7 %** | validated on 12FPS video clips |
-| False-alarm rate | **0.42 %** | — |
-| Training required | No | Model pre-trained (6,507 Phase-2 crops) |
-| Elements inspected | 28 ROIs (icons, digits, labels) | 5 segment zones (Phase-2 gate) |
-| Inference time | < 1 s per frame (CPU) | **≈ 8 s per video (CUDA RTX 3050)** |
-| Input | Single image / folder / video | MP4 video via REST POST |
-| Network required | No | Yes (LAN POST to server) |
-| GPU required | No | Yes (CUDA; falls back to CPU) |
+| Metric | IP4R (golden-template) | FQCT Server (EfficientNet-B0) | server_v4c Sandwich (LightGBM) |
+|--------|----------------------|-------------------------------|-------------------------------|
+| Detection rate | **92.7 %** | validated on 12FPS video clips | PR-AUC **0.9822** · ROC-AUC **0.9835** |
+| False-alarm rate | **0.42 %** | — | τ_clf = 0.65 (PASS/FAIL/ABSTAIN) |
+| Training required | No | Model pre-trained (6,507 Phase-2 crops) | LightGBM on harvested features |
+| Elements inspected | 28 ROIs (icons, digits, labels) | 5 segment zones (Phase-2 gate) | 111 atlas elements (365 features) |
+| Inference time | < 1 s per frame (CPU) | **≈ 8 s per video (CUDA RTX 3050)** | **≈ 8 s per video (CPU)** |
+| Jul-14 unseen eval | — | — | **9/10 (90%)** |
+| Sep-09 unseen eval | — | — | **3/13 (23%) — active fix** |
+| Input | Single image / folder / video | MP4 video via REST POST | MP4 video via REST POST |
+| Network required | No | Yes (LAN POST to server) | Yes (LAN POST to server) |
+| GPU required | No | Yes (CUDA; falls back to CPU) | No (CPU-only) |
 
 ---
 
@@ -322,7 +331,7 @@ The system currently inspects **28 named elements** across three categories.
 | Rmt 06, 08–13 | 3,351 | Good units (threshold calibration) |
 | Fault images | Separate zips | Known-bad units (detection validation) |
 
-### Detection performance (v03)
+### Detection performance (v03 — IP4R golden-template)
 
 | Metric | Value | Calibration method |
 |--------|-------|-------------------|
@@ -331,6 +340,40 @@ The system currently inspects **28 named elements** across three categories.
 | Coverage threshold | 0.6749 | Mean − 3σ from 3,351 good-unit measurements |
 | SSIM threshold | 0.1945 | Mean − 3σ per-ROI calibrated floor |
 | CNN threshold | 0.45 | Above Rmt09/Rmt13 good-bank max (0.42) |
+
+### Detection performance (v05 — server_v4c Sandwich LightGBM)
+
+Three-class verdict: **PASS / FAIL / ABSTAIN** (ABSTAIN when video contrast quality is too low to score reliably).
+
+**Training runs:**
+
+| Run | Dataset | PR-AUC | ROC-AUC | τ_clf | τ_cross | Train vids | Val vids |
+|-----|---------|--------|---------|-------|---------|------------|---------|
+| sandwich_20260719_153250 | June-27-2026 | 0.9793 | 0.9841 | 0.8932 | 0.1642 | 139 | 21 |
+| **sandwich_20260907_140534** | + Aug-28-2026 | **0.9558** | **0.9672** | **0.6401** | 0.3159 | **188** | **32** |
+
+**Dataset at Sep-07 retrain:**
+
+| Session | Videos | Rows (Phase-B) | Label |
+|---------|--------|----------------|-------|
+| June-27-2026 Good (FHD 12-FPS) | 50 | — | 0 |
+| June-27-2026 Not Good (FHD 12-FPS) | 57 | — | 1 |
+| June-27-2026 Not Good (FHD 30-FPS) | varies | — | 1 (train-only) |
+| **Aug-28-2026 Good (12-FPS)** | **14** | **—** | **0** |
+| **Aug-28-2026 Not Good (12-FPS)** | **50** | **—** | **1** |
+| May-06-2026 stills (domain adapt.) | — | 329 | 0 (train-only) |
+| **Total in parquet** | — | **9,403** | — |
+
+**Verdict logic (verdict_v2.py):**
+1. **Quality gate** → ABSTAIN if `med_Cref < Q_video` (video too dark/blurry to register)
+2. **Element floor** → FAIL if any expected-ON element has `med_nc < floor(e)` (86 stable elements)
+3. **Classifier ratio** → FAIL if `fail_ratio ≥ 0.50` (τ = 0.6401)
+4. Otherwise → **PASS**
+
+**Model artefacts (tangent server):** `~/src/IP4R/server_v4/runs/sandwich_20260907_140534/`
+- `lgb_model.txt` — LightGBM classifier
+- `lr_model.pkl` / `lr_scaler.pkl` — LogReg baseline
+- `results.json` — full metrics + phase_b_on elements
 
 ### Inference latency (approximate)
 
@@ -799,8 +842,13 @@ print(f'Total: {d[\"total\"]}  PASS: {d[\"passed\"]}  FAIL: {d[\"failed\"]}')
 | T5 | Wire Tier B: train Anomalib PatchCore on good-bank; fuse heatmap verdict | Low | Open |
 | T6 | Batch mode CSV export; latency benchmark on production hardware | Low | Open |
 | T7 | Rebuild golden as mean of several good captures (kills single-photo glare bias) | High | Open |
+| **T8** | **Run `gate_g2.py` on Sep-07 model to validate cross-session generalisation** | **High** | **Open** |
+| T9 | Investigate τ shift (0.89→0.64): identify which Aug-28 NOT GOOD videos score low confidence | Medium | Open |
+| T10 | Deploy `sandwich_20260907_140534` to live server_v4c on tangent (replace July-19 model) | High | Open |
 
 **The highest-leverage action is T2** — data-driven threshold calibration from real good units. The current 3σ floor was computed on the dataset available; expanding the calibration set tightens the operating window and directly improves both detection rate and false-alarm rate.
+
+**For server_v4c sandwich pipeline, next action is T8** — `gate_g2.py` cross-session check is required before deploying the Sep-07 retrained model to production.
 
 ---
 
@@ -1136,6 +1184,224 @@ scp server/app.py server/worker.py server/lcd_crop.py server/job_store.py \
 scp config/fqct_server.yaml \
     om@tangentthoughttech.com:/home/om/src/fqct_server/config/
 ```
+
+---
+
+## 15. v06 Development — Sep-09 Fix Plan
+
+### 15.1 Sep-09 Test Results & Root Cause
+
+**Date evaluated:** 2026-09-10  
+**Dataset:** 13 videos, all labeled GOOD (PASS), downloaded from Google Drive folder `Sep-09-2026` (Drive ID: `1Wrf4Qf-bOaYDhzI2dRoM2arNvZR4EW7O`)  
+**Current model:** `sandwich_20260909_081408` (τ_clf = 0.65)
+
+#### Per-video results
+
+| Video | GT | Verdict | B-frames | FailR | med_Cref | Gate |
+|---|---|---|---|---|---|---|
+| 200811 | PASS | **ABSTAIN** | 11 | 0.545 | 10.9 | evidence |
+| 201244 | PASS | **ABSTAIN** | 5 | 0.600 | 10.7 | evidence |
+| 201351 | PASS | **ABSTAIN** | 9 | 0.667 | 7.6 | evidence |
+| 201454 | PASS | **ABSTAIN** | 3 | 0.667 | 7.9 | evidence |
+| 201608 | PASS | PASS ✓ | 7 | 0.286 | 16.0 | classifier |
+| 201704 | PASS | **ABSTAIN** | 6 | 0.500 | 11.0 | evidence |
+| 201759 | PASS | **ABSTAIN** | 12 | 0.500 | 11.4 | evidence |
+| 201854 | PASS | **FAIL** ✗ | 11 | 0.636 | 12.6 | classifier |
+| 201950 | PASS | **FAIL** ✗ | 5 | 1.000 | 13.4 | classifier |
+| 202046 | PASS | PASS ✓ | 10 | 0.200 | 11.3 | classifier |
+| 202145 | PASS | **ABSTAIN** | 6 | 0.500 | 14.0 | evidence |
+| 202244 | PASS | PASS ✓ | 8 | 0.375 | 11.0 | classifier |
+| 202345 | PASS | **FAIL** ✗ | 8 | 0.875 | 15.0 | classifier |
+
+**Score: 3/13 (23%) — 6 ABSTAIN · 4 wrong FAIL · 3 correct PASS**
+
+#### Video characteristics (Sep-09 vs Jul-14)
+
+| Property | Jul-14 (working) | Sep-09 (broken) |
+|---|---|---|
+| Duration | 24–25 s | 18.8–19.7 s |
+| FPS | 12 | 12 |
+| Phase-A visible | Yes, ~0–1 s | **No — Phase-B starts at 0.0 s** |
+| Raw Phase-B frames | 111–236 | 52–168 |
+| Valid frames (post pipeline) | **70–140** | **3–28** |
+| med_Cref | 20–45 (bright) | 7–16 (dim) |
+
+#### Frame dropout diagnosis on video 201351
+
+Instrumented frame-by-frame on the worst-case video (225 total frames, 168 Phase-B detected):
+
+```
+Not Phase-B (classify_phase):   57 frames
+register() returned None:       122 frames  ← 73% of Phase-B — ORB has no keypoints
+C_ref < C_MIN_ABS (5.0):         18 frames
+Valid frames reaching LGB:        28 frames (server saw 9 due to SCAN_STEP interaction)
+
+C_ref distribution of post-register Phase-B frames:
+  min=0.38  p10=0.64  median=6.46  p90=23.91  max=70.0
+  → Bimodal: most frames near-dark (C_ref < 1), occasional bright spikes (C_ref > 50)
+```
+
+C_ref comparison across sessions (sampled, 3 videos each):
+```
+Aug-28 GOOD:  median=12.9  p10=4.5   reg_fails=73   (training data)
+Sep-09 GOOD:  median=8.2   p10=0.7   reg_fails=189  (test set, 2.6× more failures)
+```
+
+---
+
+### 15.2 Central Insight — The Architectural Bug
+
+The failure chain (registration collapse → feature blow-up → few-shot noise → classifier never saw dim GOOD) appears to be four independent problems. **They are all symptoms of one design mistake:**
+
+> **Registration is solved per-frame, but the geometry it's solving for is constant for the entire video.**
+
+The remote sits on a fixed jig in front of a fixed camera. The camera-to-LCD affine transform cannot change frame-to-frame within a single recording — only the *brightness* of the LCD changes. Per-frame ORB+ECC registration re-solves a problem that has exactly one answer per video, and it fails on 73% of attempts because it is being asked to find keypoints in frames that are physically too dark to contain any (C_ref < 1). No amount of ORB/ECC tuning fixes this — you cannot detect keypoints in noise.
+
+**The fix: register once per video from the brightest available frames, then warp every frame with the recovered transform — including the dark ones.**
+
+The secondary hypothesis for the bimodal C_ref: **PWM backlight aliasing against 12 FPS.** If the Sep-09 batch uses a backlight driver frequency that isn't a clean multiple of 12 fps, successive frames sample different duty-cycle phases, producing alternating dark/bright. This could also explain the missing Phase-A (auto-exposure hunting at capture start). Worth 30 min of FFT analysis before assuming it's purely a software problem.
+
+---
+
+### 15.3 Diagnostic Checklist
+
+Run these **before writing any pipeline changes**. Results determine which variant of register-once to build.
+
+- [ ] **D1 — Validate fixed-geometry assumption.** For 3–4 Sep-09 videos, independently register 5 bright frames each (C_ref > 15). Compare resulting affine matrices. If they agree within a few pixels → jig is static → global register-once is safe. If they disagree → periodic re-registration (every ~2 s, anchored to nearest bright frame) is needed.
+- [ ] **D2 — Brightness time-series + FFT.** For each Sep-09 video, plot per-frame mean luma over time. Run FFT. Look for dominant periodicity (PWM aliasing = regular high-frequency vs. auto-exposure hunting = irregular decaying).
+- [ ] **D3 — Re-examine `_classify_phase` on Sep-09.** With brightness series in hand, confirm whether "no Phase-A" means the phase truly starts differently, or whether the phase classifier's absolute threshold (tuned on Jul-14/Aug-28 exposure) is mislabeling dark frames as Phase-B.
+- [ ] **D4 — Check capture metadata.** Camera logs, exposure/gain settings, firmware version for Jul-14/Aug-28 vs. Sep-09. Did anything on the rig change?
+
+---
+
+### 15.4 Fix Priority Order
+
+#### Fix 1 — Register-once-per-video *(highest leverage)*
+
+**Solves:** 73% registration failure. Expected to raise valid frames from 3–28 → ~70–140 range.
+
+```python
+def process_video(frames, phase_b_mask):
+    # 1. Cheap brightness scan — no registration yet
+    quick_stats = [fast_luma_stats(f) for f in frames]
+
+    # 2. Pick top-K brightest Phase-B candidates as registration anchors
+    anchor_idxs = top_k_by_brightness(quick_stats, phase_b_mask, k=5)
+
+    # 3. Try registration on anchors in brightness order until one succeeds
+    transform = None
+    for idx in anchor_idxs:
+        transform = try_register(frames[idx])   # existing ORB+ECC, unchanged
+        if transform is not None:
+            break
+    if transform is None:
+        return ABSTAIN(reason="no_anchor_frame_registered")
+
+    # 4. Apply the SAME transform to ALL Phase-B frames
+    aligned = [warp(f, transform) for f in phase_b_frames]
+    # ... feature extraction on aligned frames (including dark ones)
+```
+
+**Files:** refactor `register.py` calling convention; update `app.py:_score_video` to collect all Phase-B frames first, then call register-once.  
+**Fallback (if D1 shows jig drift):** re-anchor every ~2 s of video.  
+**Acceptance:** video 201351 valid-frame count goes from 9 → target 100+.
+
+---
+
+#### Fix 2 — Soft confidence weight instead of hard C_MIN_ABS gate
+
+**Solves:** hard gate at C_ref=5.0 discards aligned-but-dim frames entirely; wastes information.
+
+```python
+w(frame) = C_ref / (C_ref + k)    # k ≈ 5.0; tunable
+# Use w as per-frame weight in fail_ratio and evidence formulas
+```
+
+Frames with C_ref=1 contribute weakly; C_ref=30 dominates. Naturally down-weights exactly the frames where nc(e) is numerically noisiest.
+
+**Files:** `verdict_v2.py` — replace boolean validity filter with weight; `app.py:_score_video` — propagate weights.  
+**Acceptance:** re-run Jul-14 tau sweep after this change and confirm ≥9/10 preserved.
+
+---
+
+#### Fix 3 — Wilson-score confidence-aware ABSTAIN
+
+**Solves:** fixed `EVIDENCE_MIN=1.5` treats "3 frames, 2 fail" and "30 frames, 20 fail" identically.
+
+Replace the ad-hoc `n_frames × (fail_ratio − 0.5)` evidence formula with a Wilson score interval on the weighted fail_ratio given effective sample size `n_eff = Σw`. Declare FAIL/PASS only when the interval clears 0.5 with margin; otherwise ABSTAIN.
+
+**Files:** `verdict_v2.py` L3.  
+**Acceptance:** ABSTAIN rate on Jul-14 does not increase (high frame counts → tight intervals); ABSTAIN is conservative on genuinely low-evidence videos.
+
+---
+
+#### Fix 4 — `_classify_phase` recalibration for no-Phase-A case
+
+**Solves:** Sep-09 has no Phase-A; phase classifier threshold may misfire on dimmer exposure.
+
+Depends on D3 findings:
+- If threshold-miscalibration: make Phase-A/B threshold session-relative (percentile-based within video's own brightness distribution) rather than absolute value tuned on Jul-14/Aug-28.
+- If Sep-09 genuinely has no Phase-A (different protocol): make Phase-A detection optional — if no Phase-A found in first N seconds, treat whole video as Phase-B from t=0.
+
+**Files:** `server_v3/worker.py:_classify_phase`.
+
+---
+
+#### Fix 5 — Synthetic Sep-09 FAIL examples via defect injection
+
+**Solves:** zero labeled FAIL examples from Sep-09; can't retrain without them.
+
+Use the 111-mask Atlas to manufacture hard negatives from the 13 labeled Sep-09 GOOD videos (post Fix 1). For each aligned Sep-09 frame, darken one or more Atlas mask regions to background level (dead segment) or brighten a normally-OFF region (ghost segment). Recompute `nc(e)` on modified frame. Produces FAIL examples sharing Sep-09's actual exposure/PWM/noise characteristics.
+
+Vary: which element(s) corrupted · severity (full vs. partial) · how many per video.
+
+**New file:** `server_v4/sandwich/synth_fail_injection.py`  
+**Acceptance:** manually inspect sample injected frames; confirm they look like plausible real defects.
+
+---
+
+#### Fix 6 — Retrain with rebalanced session-diverse data
+
+**Solves:** 14 GOOD : 50 NOT GOOD imbalance; no Sep-09 brightness regime in training.
+
+Retrain including:
+- All existing Aug-28 GOOD/FAIL + Jun-27 data (unchanged weights)
+- 13 Sep-09 GOOD videos (post Fix 1, many more valid frames) — label PASS, weight 2.0
+- Synthetic Sep-09 FAIL frames from Fix 5 — label FAIL, weight 1.0 (lower than real labeled data)
+- Re-sweep τ_clf and re-tune evidence/Wilson threshold jointly (they interact).
+
+**Files:** `train_clf_v2.py`, `harvest.py` (add Sep-09 harvest path + synthetic-FAIL path).
+
+---
+
+### 15.5 Validation Protocol
+
+**Report all three sets every time — not just whichever looks best:**
+
+| Set | What it tests | Target |
+|---|---|---|
+| **Jul-14** (10 videos, 5 GOOD + 5 NOT GOOD) | No regression | ≥ 9/10 (current baseline) |
+| **Sep-09** (13 videos, all GOOD) | The active problem | ≥ 11/13 as PASS |
+| **Synthetic Sep-09 FAIL** (held out from Fix 5) | Sensitivity — didn't model just learn "Sep-09 = PASS"? | High recall on injected defects |
+
+A model that fixes Sep-09 GOOD but fails the synthetic-FAIL check has learned a biased shortcut — treat that as a **fail**, not a partial win.
+
+---
+
+### 15.6 Dataset Policy
+
+**Immutable rules for all future development:**
+
+| Dataset | Role | Training? |
+|---|---|---|
+| Aug-28-2026 GOOD (14 videos) | Training PASS | ✅ Yes |
+| Aug-28-2026 NOT GOOD (50 videos; 13 kept) | Training FAIL | ✅ Yes (filtered) |
+| Jun-27-2026 (214 videos) | Training mixed | ✅ Yes |
+| Jul-14-2026 (10 videos) | **Unseen eval — LOCKED** | ❌ Never |
+| **Sep-09-2026 (13 videos)** | **Unseen eval — LOCKED** | ❌ Never |
+| Synthetic Sep-09 FAIL (from Fix 5) | Training FAIL (soft weight) | ✅ After Fix 5 |
+
+Sep-09 remains the test set permanently. Even after Fix 6 retraining, these 13 videos are not used as training data. If real Sep-09 NOT GOOD videos arrive from the client, they go into training only after being held out for at least one validation round.
 
 ---
 
