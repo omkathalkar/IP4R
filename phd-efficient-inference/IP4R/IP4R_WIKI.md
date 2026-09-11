@@ -2,9 +2,9 @@
 
 > **Project:** IP4R — AC-Remote LCD Splash-Screen Quality Control  
 > **Author:** Om Kathalkar  
-> **Version:** v06 (Sep-09-2026 collapse diagnosed · register-once fix plan locked)  
+> **Version:** v07 (lcd_crop_v5f + worker_v5c deployed · Jul-14=9/10 · Sep-09=11/13)  
 > **Last updated:** 2026-09-10  
-> **Status:** Active development · server_v4c live (9/10 Jul-14) · Sep-09 fix in progress (3/13 → target ≥11/13)
+> **Status:** Active development · server_v4c live · Jul-14=9/10 · Sep-09=11/13 · 2 remaining failures = domain gap
 
 ---
 
@@ -70,7 +70,7 @@ A GPU-accelerated inference server purpose-built for the 10-unit FQCT factory fl
 | Elements inspected | 28 ROIs (icons, digits, labels) | 5 segment zones (Phase-2 gate) | 111 atlas elements (365 features) |
 | Inference time | < 1 s per frame (CPU) | **≈ 8 s per video (CUDA RTX 3050)** | **≈ 8 s per video (CPU)** |
 | Jul-14 unseen eval | — | — | **9/10 (90%)** |
-| Sep-09 unseen eval | — | — | **3/13 (23%) — active fix** |
+| Sep-09 unseen eval | — | — | **11/13 (85%) — 2 failures = domain gap** |
 | Input | Single image / folder / video | MP4 video via REST POST | MP4 video via REST POST |
 | Network required | No | Yes (LAN POST to server) | Yes (LAN POST to server) |
 | GPU required | No | Yes (CUDA; falls back to CPU) | No (CPU-only) |
@@ -1487,6 +1487,26 @@ Remaining Sep-09 failures (domain gap, not LCD detection):
 - `202145`: FAIL — LightGBM trained on Jul-14 misclassifies Sep-09 lit-LCD feature distribution
 
 Next step: Fix 2–6 from Section 15.4 for the remaining 2 Sep-09 failures.
+
+### 16.6 Server UI Notes — v4c Label vs v5f Code
+
+**"v4c SANDWICH" badge is the server/model version**, not the lcd_crop version. The badge is a constant in `app.py` referring to the LightGBM sandwich architecture. The v5f lcd_crop.py is deployed *inside* that container via `docker cp` — the badge does not change.
+
+**Server overlay format (v4c):** The server generates a 480×640 LCD crop annotated with yellow feature-region bounding boxes and a top-left verdict string (`FAIL P=0.373`). This is distinct from the Tier A inspection overlay.
+
+**Tier A overlay format (`ip4r inspect` CLI):** Shows the full remote body + LCD glass with green boxes for passing ROIs and red boxes for failing ROIs, drawn on top of the original photo. Verdict at top: `IP4R: FAIL (N element(s))`.
+
+| Property | Server v4c overlay | Tier A `ip4r inspect` overlay |
+|---|---|---|
+| Canvas | 480×640 LCD crop only | Full remote photo |
+| Box color | Yellow (feature regions) | Green=pass / Red=fail |
+| Verdict | `FAIL P=<prob>` | `IP4R: FAIL (N element(s))` |
+| Method | LightGBM probability | Coverage + SSIM vs golden |
+| Trigger | POST `/inspect_queue` | `ip4r inspect <photo>` |
+
+Integrating the Tier A overlay into the server would require running the ROI-level checks on the best phase_b frame and annotating the full perspective-corrected remote image.
+
+**Sep-09 `no_b_frames` behavior:** Most Sep-09 videos in the dashboard show gate=`no_b_frames`, Evidence=0.0, med_Cref=0.0, verdict=PASS. This means the phase classifier found zero phase_b frames — server defaults to PASS (not ABSTAIN) on zero-evidence videos. Only `202145` went through LightGBM (n_b=5, gate=`classifier`, FAIL) and `201454` had n_b=2 (below EVIDENCE_MIN=1.5 → ABSTAIN).
 
 ---
 
