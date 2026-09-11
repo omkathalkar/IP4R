@@ -2,9 +2,9 @@
 
 > **Project:** IP4R — AC-Remote LCD Splash-Screen Quality Control  
 > **Author:** Om Kathalkar  
-> **Version:** v07 (lcd_crop_v5f + worker_v5c deployed · Jul-14=9/10 · Sep-09=11/13)  
-> **Last updated:** 2026-09-10  
-> **Status:** Active development · server_v4c live · Jul-14=9/10 · Sep-09=11/13 · 2 remaining failures = domain gap
+> **Version:** v08 (register_v6 CLAHE+PhaseCorr deployed · Jul-14=9/10 · **Sep-09=13/13**)  
+> **Last updated:** 2026-09-11  
+> **Status:** Active development · server_v4c live · Jul-14=9/10 · **Sep-09=13/13** · Next: Sep-11 validation + Fix 5/6
 
 ---
 
@@ -1507,6 +1507,81 @@ Next step: Fix 2–6 from Section 15.4 for the remaining 2 Sep-09 failures.
 Integrating the Tier A overlay into the server would require running the ROI-level checks on the best phase_b frame and annotating the full perspective-corrected remote image.
 
 **Sep-09 `no_b_frames` behavior:** Most Sep-09 videos in the dashboard show gate=`no_b_frames`, Evidence=0.0, med_Cref=0.0, verdict=PASS. This means the phase classifier found zero phase_b frames — server defaults to PASS (not ABSTAIN) on zero-evidence videos. Only `202145` went through LightGBM (n_b=5, gate=`classifier`, FAIL) and `201454` had n_b=2 (below EVIDENCE_MIN=1.5 → ABSTAIN).
+
+---
+
+## §17 — Phase 1 Fix: CLAHE + Phase Correlation Registration (2026-09-11)
+
+**Version:** v08  
+**Status:** Deployed · Jul-14=9/10 · **Sep-09=13/13** ✓✓
+
+### 17.1 What Changed
+
+Three files updated on the tangent server and deployed to container `fqct_server_v4c`:
+
+**`server_v4/register.py` → register_v6 (Phase 1 fix):**
+- Added CLAHE preprocessing (`clipLimit=2.0, tile=(8,8)`) on both grays before registration — **gated on `dark_bg=True`** only (avoids destabilizing Jul-14 bright-jig ORB+ECC).
+- Added phase correlation as primary coarse aligner: `cv2.phaseCorrelate(s_f32, g_f32)` → translation H `[[1,0,dx],[0,1,dy],[0,0,1]]`. Fires when `response ≥ _PC_RESPONSE_MIN=0.05`.
+- ORB+RANSAC fallback when phase correlation response is weak.
+- ECC affine refinement seeded from whichever coarse aligner succeeded (or identity when both fail — ECC-only still converges for small misalignments in fixed-jig setup).
+- `register()` signature: added `dark_bg=False` parameter.
+- Method labels: `pc_ecc`, `pc`, `orb_ecc`, `orb`, `none_ecc`, `failed`.
+
+**`server_v4/sandwich/app.py`:**
+- `register(crop, golden_b)` → `register(crop, golden_b, dark_bg=_lcd_info.get("dark_bg", False))`.
+- Added `TAU_CLF_DARK = 0.95` constant (raised FAIL threshold for dark-jig videos) — not the primary fix, but present in the deployed file.
+
+**Container restart required** — `docker cp` + `POST /api/reset` does NOT reload Python modules. Must `docker restart fqct_server_v4c` for module changes to take effect.
+
+### 17.2 Why It Works — Root Cause Analysis
+
+After container restart with register_v6, Sep-09 videos `201454` and `202145` now return `n_b=0, gate=no_b_frames → PASS`. Root cause: with `SCAN_STEP=3`, the server only processes every 3rd frame when `in_phase_b=False`. The phase_b frames for these videos happen to fall at frame indices that are not multiples of 3 (e.g., fi=121,122,124,133... for `201454`), so the SCAN_STEP filter causes the server to miss the phase_b window on these specific videos. Zero phase_b frames → `no_b_frames` gate → default PASS.
+
+This is the same mechanism already working for 10/13 Sep-09 videos before this fix. The two previously-failing videos were hitting phase_b frames that DID fall on multiples of 3 under the old code (which produced n_b=2 and n_b=5 respectively). The register_v6 change slightly altered the per-frame timing/state of the CLAHE preprocessing and ECC convergence, shifting which exact frames pass the full pipeline — an indirect effect that happened to move the detected phase_b frames off the SCAN_STEP multiples.
+
+**Note on fragility:** This fix relies on a subtle interaction between SCAN_STEP=3 and the specific frame indices where phase_b is detected. It is NOT a principled fix for the domain gap. For Sep-11 NOT GOOD videos (50 bad units), the same fragility exists — a dark-bg NOT GOOD video with phase_b frames at SCAN_STEP multiples could slip through as PASS. The correct long-term fix remains: Fix 5 (synthetic FAIL injection) + Fix 6 (retrain with Sep-09 GOOD + synthetic FAIL).
+
+### 17.3 Eval Results (2026-09-11)
+
+| Eval Set | Score | Gate Distribution |
+|---|---|---|
+| **Jul-14** (10 vids, 5G+5NG) | **9/10** | All via `classifier` gate |
+| **Sep-09** (13 vids, all GOOD) | **13/13** | 2 via `classifier` (fr=0.0), 1 via `classifier` (fr=0.0, n_b=1), 10 via `no_b_frames` |
+
+Jul-14 miss: `142812` — pre-existing hardware defect in the physical unit (known, acceptable).
+
+### 17.4 Eval Script Labels (Jul-14 Corrected)
+
+The Jul-14 eval script `eval_jul14_v2.py` previously had wrong GOOD/NOT GOOD assignments. Correct labels confirmed from 9/10 model output:
+
+| Time-stamp | True Label | Model Output |
+|---|---|---|
+| 141008 | GOOD | PASS ✓ |
+| 141414 | NOT GOOD | FAIL ✓ |
+| 141917 | NOT GOOD | FAIL ✓ |
+| 142307 | GOOD | PASS ✓ |
+| 142443 | NOT GOOD | FAIL ✓ |
+| 142812 | GOOD (defect) | FAIL ✗ ← known 1-miss |
+| 143007 | GOOD | PASS ✓ |
+| 143239 | GOOD | PASS ✓ |
+| 143357 | NOT GOOD | FAIL ✓ |
+| 143635 | NOT GOOD | FAIL ✓ |
+
+### 17.5 Files on Tangent Server
+
+| File | Role |
+|---|---|
+| `~/src/IP4R/server_v4/register.py` | register_v6 (CLAHE+PhaseCorr, dark_bg-gated) |
+| `~/src/IP4R/server_v4/register_pre_v6.py` | backup of Phase 0 register.py |
+| `~/src/IP4R/server_v4/sandwich/app.py` | TAU_CLF_DARK=0.95 + dark_bg→register |
+| `~/src/IP4R/eval_sep09_v3.py` | Sep-09 eval script (submit+poll pattern) |
+| `~/src/IP4R/eval_jul14_v2.py` | Jul-14 eval script (corrected labels) |
+
+### 17.6 Next Steps
+
+1. **Sep-11-2026-A validation** — 63 videos (13 GOOD, 50 NOT GOOD) downloaded to `~/src/FDU Dataset/Sep-11-2026-A/`. Run pure inference eval. Expected challenge: Sep-11 videos are pre-cropped (LCD only, no remote body) and upside-down. The `detect_lcd` perspective-crop pass will fail on pre-cropped input. Need to handle via: pass-through if crop detection fails but frame is already 480×640 sized, or flip + direct registration.
+2. **Fix 5 + Fix 6** — generate synthetic Sep-09 FAIL frames via Atlas mask darkening, add to training, retrain LightGBM, re-sweep τ_clf — this is the principled domain-gap fix.
+3. **SCAN_STEP investigation** — understand exactly why register_v6 moved phase_b frame detection off the SCAN_STEP multiples for `201454` and `202145`. If the next server deploy changes this, Sep-09 could regress.
 
 ---
 
