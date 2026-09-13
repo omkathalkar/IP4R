@@ -1,0 +1,67 @@
+{
+  "golden_path": "data/reference/phase_b_golden.png",
+  "atlas_path": "data/reference/rois.yaml",
+  "std_mult": 3.0,
+  "n_candidates": 3,
+  "good_dirs": [
+    "/home/om/src/FDU Dataset/June-27-2026/Good DTS Videos FHD 1920x1080/12-FPS"
+  ],
+  "elements": {
+    "top_icons": {
+      "mean": 1.19744,
+      "std": 0.27164,
+      "p01": 0.7919,
+      "threshold": 0.7919,
+      "n": 50
+    },
+    "icon_strip": {
+      "mean": 1.24772,
+      "std": 0.38138,
+      "p01": 0.33329,
+      "threshold": 0.33329,
+      "n": 50
+    },
+    "left_clock": {
+      "mean": 1.19869,
+      "std": 0.5283,
+      "p01": 0.16695,
+      "threshold": 0.16695,
+      "n": 50
+    },
+    "right_clock": {
+      "mean": 0.86193,
+      "std": 0.21841,
+      "p01": 0.38556,
+      "threshold": 0.38556,
+      "n": 50
+    },
+    "center_88": {
+      "mean": 1.52798,
+      "std": 0.65197,
+      "p01": 0.5093,
+      "threshold": 0.5093,
+      "n": 50
+    },
+    "signal_bars": {
+      "mean": 1.55397,
+      "std": 0.54657,
+      "p01": 0.66509,
+      "threshold": 0.66509,
+      "n": 50
+    },
+    "secondary_icons": {
+      "mean": 1.47582,
+      "std": 0.58636,
+      "p01": 0.62904,
+      "threshold": 0.62904,
+      "n": 50
+    },
+    "bottom_88888": {
+      "mean": 1.83138,
+      "std": 0.97679,
+      "p01": 0.25329,
+      "threshold": 0.25329,
+      "n": 50
+    }
+  }
+}

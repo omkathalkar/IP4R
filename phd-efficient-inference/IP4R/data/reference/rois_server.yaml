@@ -1,0 +1,45 @@
+# ROI atlas for IP4R v6b Method 1 (pure CV)
+# Calibrated on server portrait golden: phase_b_golden.png (480×640, portrait)
+# Coordinates: x=col/480, y=row/640, w=width/480, h=height/640
+# Source ground truth: server_v3/worker.py _SEG_ROIS + _ICON_Y1/Y2/X1/X2
+rois:
+- name: top_icons
+  x: 0.17708
+  y: 0.00000
+  w: 0.65625
+  h: 0.14063
+- name: icon_strip
+  x: 0.17708
+  y: 0.14063
+  w: 0.65625
+  h: 0.07813
+- name: left_clock
+  x: 0.14583
+  y: 0.21875
+  w: 0.26042
+  h: 0.10156
+- name: right_clock
+  x: 0.48958
+  y: 0.21875
+  w: 0.30208
+  h: 0.10156
+- name: center_88
+  x: 0.14583
+  y: 0.33594
+  w: 0.25000
+  h: 0.14063
+- name: signal_bars
+  x: 0.64583
+  y: 0.39063
+  w: 0.16667
+  h: 0.08594
+- name: secondary_icons
+  x: 0.09375
+  y: 0.47656
+  w: 0.81250
+  h: 0.15625
+- name: bottom_88888
+  x: 0.36458
+  y: 0.63281
+  w: 0.45833
+  h: 0.07813
