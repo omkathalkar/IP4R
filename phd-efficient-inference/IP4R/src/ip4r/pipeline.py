@@ -48,13 +48,42 @@ class Inspector:
                 except Exception as e:
                     print(f"[Inspector] CNN load failed ({e}), continuing without it")
 
+    def _get_remote_bbox(self, frame_bgr: np.ndarray) -> tuple[int, int, int, int] | None:
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        c = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(c) < 5000:
+            return None
+        return cv2.boundingRect(c)
+
     def inspect_array(self, sample_bgr: np.ndarray, image_path: str) -> InspectionResult:
         if not self.rois:
             raise RuntimeError(
                 "No ROIs defined. Author them first:  ip4r roi-edit"
             )
         sample_proc = preprocess(sample_bgr, self.cfg)
-        aligned, reg_info = register(sample_proc, self.golden_proc, self.cfg)
+        
+        # Detect remote to crop away the black jig, which confuses ORB
+        bbox = self._get_remote_bbox(sample_bgr)
+        if bbox:
+            x, y, w, h = bbox
+            sample_proc_crop = sample_proc[y:y+h, x:x+w]
+            aligned_crop, reg_info = register(sample_proc_crop, self.golden_proc, self.cfg)
+            H_crop = reg_info.get("homography")
+            if H_crop is not None:
+                T_inv = np.array([[1, 0, -x], [0, 1, -y], [0, 0, 1]], dtype=np.float64)
+                H_full = H_crop @ T_inv
+                reg_info["homography"] = H_full
+                # warp full image for roi inspection
+                aligned = cv2.warpPerspective(sample_proc, H_full, 
+                                              (self.golden_proc.shape[1], self.golden_proc.shape[0]))
+            else:
+                aligned = sample_proc
+        else:
+            aligned, reg_info = register(sample_proc, self.golden_proc, self.cfg)
 
         roi_kinds = self.cfg.get("tier_a.roi_kinds", [])
         active_rois = [r for r in self.rois if not roi_kinds or r.kind in roi_kinds]

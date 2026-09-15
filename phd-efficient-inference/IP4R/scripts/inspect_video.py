@@ -145,6 +145,7 @@ def inspect_video(
     start_skip_s: float = 5.0,
     stable_needed: int = 3,
     cal_t_s: float = 2.0,
+    manual_time_s: float | None = None,
 ) -> None:
     cfg = Config.load(REPO_ROOT / "config" / "default.yaml")
     inspector = Inspector(cfg)
@@ -170,7 +171,8 @@ def inspect_video(
     digit_rois     = [r for r in inspector.rois if r.kind == "digit"]
 
     # ── Phase 1: one-time registration for fast warp ─────────────────────────
-    print(f"\nRegistering calibration frame at t={cal_t_s}s …")
+    print(f"\n=== PHASE 1: One-Time Calibration ===")
+    print(f"Registering calibration frame at t={cal_t_s}s …")
     cal_fi = int(cal_t_s * fps)
     cap.set(cv2.CAP_PROP_POS_FRAMES, cal_fi)
     ret, cal_frame = cap.read()
@@ -178,14 +180,27 @@ def inspect_video(
     H_cal_inv = None
     if ret:
         cal_proc = preprocess(cal_frame, cfg)
-        _, cal_reg = register(cal_proc, inspector.golden_proc, cfg)
-        H_raw = cal_reg.get("homography")
+        bbox = inspector._get_remote_bbox(cal_frame)
+        if bbox:
+            x, y, w, h = bbox
+            cal_proc_crop = cal_proc[y:y+h, x:x+w]
+            _, cal_reg = register(cal_proc_crop, inspector.golden_proc, cfg)
+            H_crop = cal_reg.get("homography")
+            if H_crop is not None:
+                T_inv = np.array([[1, 0, -x], [0, 1, -y], [0, 0, 1]], dtype=np.float64)
+                H_raw = H_crop @ T_inv
+            else:
+                H_raw = None
+        else:
+            _, cal_reg = register(cal_proc, inspector.golden_proc, cfg)
+            H_raw = cal_reg.get("homography")
+
         if H_raw is not None:
             H_cal = np.array(H_raw, dtype=np.float64)
             H_cal_inv = np.linalg.inv(H_cal)
-            print(f"  Registration OK (method={cal_reg.get('method')})")
+            print(f"  [SUCCESS] Remote body detected and aligned! (method={cal_reg.get('method')})")
         else:
-            print("  WARNING: registration failed, coverage scan may be inaccurate")
+            print("  [ERROR] Failed to detect the remote body in this frame! Coverage scan may be inaccurate.")
 
     # ── Phase 2: fast frame scan for splash ───────────────────────────────────
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -202,7 +217,8 @@ def inspect_video(
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-    print(f"\nScanning for splash screen (skipping first {start_skip_s}s) …")
+    print(f"\n=== PHASE 2: Fast Splash Screen Scan ===")
+    print(f"Scanning for splash screen (skipping first {start_skip_s}s) …")
     for fi in range(total):
         ret, frame = cap.read()
         if not ret:
@@ -210,7 +226,12 @@ def inspect_video(
 
         t_sec = fi / fps
 
-        if fi < start_fi or triggered:
+        is_skip = (fi < start_fi)
+        if manual_time_s is not None:
+            target_fi = int(manual_time_s * fps)
+            is_skip = (fi < target_fi)
+
+        if is_skip or triggered:
             # ── before skip window or after trigger: just draw frozen state ──
             if triggered and frozen_overlay is not None:
                 out_frame = frozen_overlay.copy()
@@ -221,29 +242,45 @@ def inspect_video(
                     f"frame {fi+1}/{total}",
                 )
             else:
+                bbox = inspector._get_remote_bbox(frame)
+                if bbox:
+                    x, y, w, h = bbox
+                    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
                 out_frame = _draw_status_bar(frame, "SCANNING…", INFO_COLOR,
                                               f"t={t_sec:.1f}s  frame {fi+1}/{total}")
             writer.stdin.write(out_frame.tobytes())
             continue
 
         # ── fast coverage check using pre-computed homography ─────────────────
+        bbox = inspector._get_remote_bbox(frame)
+        if bbox:
+            x, y, w, h = bbox
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+
         proc = preprocess(frame, cfg)
         if H_cal is not None:
             warped = cv2.warpPerspective(proc, H_cal, (gw, gh))
         else:
             warped = proc
 
-        splash_ok, covs = _fast_splash_check(
-            warped, inspector.golden_proc, digit_rois,
-            cov_ratio_min, block, cc, active_is_dark
-        )
+        if manual_time_s is not None:
+            splash_ok = True
+            covs = {}
+        else:
+            splash_ok, covs = _fast_splash_check(
+                warped, inspector.golden_proc, digit_rois,
+                cov_ratio_min, block, cc, active_is_dark
+            )
 
         if splash_ok:
             stable_cnt += 1
-            if stable_cnt == 1:
+            if manual_time_s is not None:
+                trigger_fi = fi
+                stable_cnt = stable_needed
+            elif stable_cnt == 1:
                 trigger_fi = fi
             status_text = f"STABILIZING…  ({stable_cnt}/{stable_needed})"
-            cov_str = "  ".join(f"{k.split('_')[-1]}={v:.2f}" for k, v in covs.items())
+            cov_str = "  ".join(f"{k.split('_')[-1]}={v:.2f}" for k, v in covs.items()) if covs else ""
             out_frame = _draw_status_bar(frame, status_text, WARN_COLOR,
                                           f"t={t_sec:.1f}s  {cov_str}")
         else:
@@ -256,23 +293,40 @@ def inspect_video(
         if stable_cnt >= stable_needed:
             # ── Phase 3: full inspection on the first frame of stable window ──
             t_trigger = trigger_fi / fps
-            print(f"\nSplash detected at t={t_trigger:.1f}s  (frame {trigger_fi}) — running full inspection …")
+            print(f"\n=== PHASE 3: Full Deep Inspection ===")
+            print(f"Splash detected at t={t_trigger:.1f}s  (frame {trigger_fi}) — running full inspection …")
             cap.set(cv2.CAP_PROP_POS_FRAMES, trigger_fi)
             _, trig_frame = cap.read()
             cap.set(cv2.CAP_PROP_POS_FRAMES, fi + 1)  # resume from current position
 
             result = inspector.inspect_array(trig_frame, video_path)
-            cv2.imwrite(str(out_dir / "triggered_frame.jpg"), trig_frame)
 
             # Get per-frame homography for accurate overlay quads
             trig_proc = preprocess(trig_frame, cfg)
-            _, trig_reg = register(trig_proc, inspector.golden_proc, cfg)
-            H_trig = trig_reg.get("homography")
+            bbox = inspector._get_remote_bbox(trig_frame)
+            if bbox:
+                x, y, w, h = bbox
+                trig_proc_crop = trig_proc[y:y+h, x:x+w]
+                _, trig_reg = register(trig_proc_crop, inspector.golden_proc, cfg)
+                H_crop = trig_reg.get("homography")
+                if H_crop is not None:
+                    T_inv = np.array([[1, 0, -x], [0, 1, -y], [0, 0, 1]], dtype=np.float64)
+                    H_trig = H_crop @ T_inv
+                else:
+                    H_trig = None
+            else:
+                _, trig_reg = register(trig_proc, inspector.golden_proc, cfg)
+                H_trig = trig_reg.get("homography")
+
             H_result_inv = np.linalg.inv(np.array(H_trig)) if H_trig is not None else H_cal_inv
 
             ann = trig_frame.copy()
             if H_result_inv is not None:
                 ann = _draw_roi_overlay(ann, result, H_result_inv)
+                
+            # Save the frame WITH the drawn boxes before drawing the big verdict banner
+            cv2.imwrite(str(out_dir / "triggered_frame.jpg"), ann)
+            
             ann = _draw_verdict_banner(ann, result, t_trigger)
             frozen_overlay = ann
 
@@ -298,11 +352,14 @@ def inspect_video(
     print(f"\n{'='*56}")
     print(f"  VERDICT:  {verdict}   (splash at t={t_trigger:.1f}s)")
     print(f"{'='*56}")
-    if not result.passed:
-        for r in result.failed_rois:
-            print(f"  FAIL  {r.name}: {r.reason}")
-    else:
-        print("  All ROIs passed.")
+    
+    print(f"  Detected and Inspected {len(result.roi_results)} Icons/Digits:")
+    for r in result.roi_results:
+        if r.passed:
+            print(f"   [PASS] {r.name}")
+        else:
+            print(f"   [FAIL] {r.name}: {r.reason}")
+
     print(f"\nSaved:")
     print(f"  {out_dir / 'annotated.mp4'}")
     print(f"  {out_dir / 'triggered_frame.jpg'}")
@@ -319,6 +376,8 @@ def main():
                     help="Consecutive passing frames to confirm splash (default: 3)")
     ap.add_argument("--cal-t", type=float, default=2.0,
                     help="Timestamp (s) for calibration registration frame (default: 2.0)")
+    ap.add_argument("--time", type=float, default=None,
+                    help="Specific time (s) to grab and inspect a single frame, skipping auto-detection")
     args = ap.parse_args()
 
     out_dir = REPO_ROOT / args.out
@@ -328,6 +387,7 @@ def main():
         start_skip_s=args.start_skip,
         stable_needed=args.stable_frames,
         cal_t_s=args.cal_t,
+        manual_time_s=args.time,
     )
 
 
