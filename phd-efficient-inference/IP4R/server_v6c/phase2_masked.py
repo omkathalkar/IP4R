@@ -98,7 +98,10 @@ def run_phase2(
     # ── Mask + crop ───────────────────────────────────────────────────────────
     masked_frame = _apply_white_masks(frame, bboxes)
 
-    from ..server_v6a.lcd_crop import detect_lcd
+    try:
+        from server_v6a.lcd_crop import detect_lcd
+    except ImportError:
+        from ..server_v6a.lcd_crop import detect_lcd
     crop, _ = detect_lcd(masked_frame)
     if crop is None:
         return Phase2Result(

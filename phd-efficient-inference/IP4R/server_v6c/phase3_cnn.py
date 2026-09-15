@@ -103,7 +103,10 @@ def run_phase3(
     stride       = int(fps)   # 1 second apart
     frame_idxs   = [T_star + i * stride for i in range(n_frames)]
 
-    from ..server_v6a.lcd_crop import detect_lcd
+    try:
+        from server_v6a.lcd_crop import detect_lcd
+    except ImportError:
+        from ..server_v6a.lcd_crop import detect_lcd
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
