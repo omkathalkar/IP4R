@@ -26,8 +26,8 @@ Processing takes **~90–120 seconds** per video on CPU.
 
 | `verdict` | Meaning |
 |-----------|---------|
-| `"non-defective"` | All required icons confirmed — unit passes |
-| `"defective"` | At least one required icon was never detected — confident defect |
+| `"pass"` | All required icons confirmed — unit passes |
+| `"fail"` | At least one required icon was never detected — confident defect |
 | `"abstain"` | Icons were seen but inconsistent — send to human re-inspection |
 
 ---
@@ -93,7 +93,7 @@ Processing takes **~90–120 seconds** per video on CPU.
     "completed_at": "2026-09-17T12:02:05Z",
     "input_defect_flag": "non-defective",
 
-    "verdict": "non-defective",
+    "verdict": "pass",
     "confidence": 0.847,
 
     "proof": {
@@ -120,9 +120,9 @@ Processing takes **~90–120 seconds** per video on CPU.
 
 | `defect_type` | Verdict | Meaning |
 |---------------|---------|---------|
-| `all_present` | non-defective | Every icon confirmed |
+| `all_present` | pass | Every icon confirmed |
 | `icon_flicker` | abstain | Icons seen but not stable across frames |
-| `icon_absence` | defective | One or more icons never detected |
+| `icon_absence` | fail | One or more icons never detected |
 
 | Error `status` | Cause |
 |----------------|-------|
@@ -144,7 +144,7 @@ Returns the most recent N jobs (active + completed). Useful for dashboards.
     "count": 2,
     "jobs": [
       { "job_id": "JOB-002", "state": "processing", "verdict": null,            "submitted_at": "2026-09-17T12:02:00Z" },
-      { "job_id": "JOB-001", "state": "completed",  "verdict": "non-defective", "submitted_at": "2026-09-17T12:00:00Z" }
+      { "job_id": "JOB-001", "state": "completed",  "verdict": "pass", "submitted_at": "2026-09-17T12:00:00Z" }
     ]
   }
 }

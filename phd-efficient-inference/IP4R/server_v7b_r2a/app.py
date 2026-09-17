@@ -87,7 +87,7 @@ def _err(status: str, message: str, data: dict = {}, code: int = 400) -> JSONRes
 # Internal → API spec
 
 def _api_verdict(verdict: str) -> str:
-    return {"PASS": "non-defective", "FAIL": "defective", "ABSTAIN": "abstain"}.get(verdict, "unknown")
+    return {"PASS": "pass", "FAIL": "fail", "ABSTAIN": "abstain"}.get(verdict, "unknown")
 
 
 def _confidence(verdict: str, checklist: dict, fail_icons: list) -> float:
@@ -555,9 +555,9 @@ _UI = r"""<!doctype html>
   .history-table td{padding:7px 8px;border-bottom:1px solid #21262d}
   .history-table tr:last-child td{border-bottom:none}
   .vbadge{font-size:.68rem;font-weight:700;padding:2px 8px;border-radius:10px}
-  .vbadge.non-defective{background:rgba(63,185,80,.15);color:var(--pass)}
+  .vbadge.pass{background:rgba(63,185,80,.15);color:var(--pass)}
   .vbadge.abstain{background:rgba(210,153,34,.15);color:var(--abstain)}
-  .vbadge.defective{background:rgba(248,81,73,.15);color:var(--fail)}
+  .vbadge.fail{background:rgba(248,81,73,.15);color:var(--fail)}
   .vbadge.processing,.vbadge.queued{background:rgba(88,166,255,.1);color:var(--accent)}
   .empty-state{text-align:center;color:var(--muted);padding:28px 0;font-size:.82rem}
 
@@ -586,9 +586,9 @@ _UI = r"""<!doctype html>
   <div class="left">
 
     <div class="stats">
-      <div class="stat pass">   <div class="n" id="c-pass">—</div><div class="l">Non-Defective</div></div>
+      <div class="stat pass">   <div class="n" id="c-pass">—</div><div class="l">Pass</div></div>
       <div class="stat abstain"><div class="n" id="c-abs">—</div> <div class="l">Abstain</div></div>
-      <div class="stat fail">   <div class="n" id="c-fail">—</div><div class="l">Defective</div></div>
+      <div class="stat fail">   <div class="n" id="c-fail">—</div><div class="l">Fail</div></div>
       <div class="stat pend">   <div class="n" id="c-pend">—</div><div class="l">Queue</div></div>
     </div>
 
@@ -632,7 +632,7 @@ _UI = r"""<!doctype html>
       <h2>Verdict Guide</h2>
       <div class="legend">
         <div class="legend-item"><div class="legend-dot pass"></div><div>
-          <strong>Non-Defective (PASS)</strong>
+          <strong>PASS</strong>
           <p>All 15 required icons confirmed in ≥2 consecutive frames at ≥70% confidence.</p>
         </div></div>
         <div class="legend-item"><div class="legend-dot abstain"></div><div>
@@ -640,7 +640,7 @@ _UI = r"""<!doctype html>
           <p>Every missing icon was glimpsed (≥1 frame) but never held 2 consecutive frames. Borderline — send to human re-inspection.</p>
         </div></div>
         <div class="legend-item"><div class="legend-dot fail"></div><div>
-          <strong>Defective (FAIL)</strong>
+          <strong>FAIL</strong>
           <p>At least one required icon was never detected above threshold. Icon genuinely absent — confident defect.</p>
         </div></div>
       </div>
@@ -740,9 +740,9 @@ function showWaiting(jid) {
 
 function showResult(d, jid) {
   const v = (d.verdict || 'unknown');
-  const cls = v === 'non-defective' ? 'pass' : v === 'abstain' ? 'abstain' : 'fail';
-  const emoji = v === 'non-defective' ? '✅' : v === 'abstain' ? '⚠️' : '❌';
-  const label = v === 'non-defective' ? 'NON-DEFECTIVE' : v.toUpperCase();
+  const cls = v === 'pass' ? 'pass' : v === 'abstain' ? 'abstain' : 'fail';
+  const emoji = v === 'pass' ? '✅' : v === 'abstain' ? '⚠️' : '❌';
+  const label = v.toUpperCase();
   const conf  = d.confidence != null ? ` — confidence ${(d.confidence*100).toFixed(1)}%` : '';
 
   const det = d.detail || {};
@@ -786,9 +786,9 @@ async function refreshHistory() {
     const jobs = env.data.jobs;
     let p=0, a=0, f=0;
     jobs.forEach(j => {
-      if (j.verdict==='non-defective') p++;
+      if (j.verdict==='pass') p++;
       else if (j.verdict==='abstain') a++;
-      else if (j.verdict==='defective') f++;
+      else if (j.verdict==='fail') f++;
     });
     document.getElementById('c-pass').textContent = p;
     document.getElementById('c-abs').textContent  = a;

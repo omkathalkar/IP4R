@@ -30,8 +30,8 @@ A video takes ~90–120 seconds to process. Poll every 3–5 seconds until `stat
 
 | `verdict` | Meaning |
 |-----------|---------|
-| `"non-defective"` | All required icons confirmed — unit is good |
-| `"defective"` | At least one required icon was never detected — confident defect |
+| `"pass"` | All required icons confirmed — unit is good |
+| `"fail"` | At least one required icon was never detected — confident defect |
 | `"abstain"` | Icons were glimpsed but inconsistent — send to human re-inspection |
 
 ---
@@ -107,7 +107,7 @@ Poll for the result of a submitted job.
     "completed_at": "2026-09-17T12:02:05Z",
     "input_defect_flag": "non-defective",
 
-    "verdict": "non-defective",
+    "verdict": "pass",
     "confidence": 0.847,
 
     "proof": {
@@ -136,9 +136,9 @@ Poll for the result of a submitted job.
 
 | `defect_type` | Verdict | Meaning |
 |---------------|---------|---------|
-| `all_present` | non-defective | Every icon confirmed |
+| `all_present` | pass | Every icon confirmed |
 | `icon_flicker` | abstain | Icons glimpsed but not stable |
-| `icon_absence` | defective | One or more icons never detected |
+| `icon_absence` | fail | One or more icons never detected |
 
 **Error cases:**
 
@@ -171,7 +171,7 @@ curl "http://ip4r-v7b.tangentthoughttech.com/api/v1/inference/status?rows=10"
     "count": 2,
     "jobs": [
       { "job_id": "JOB-002", "state": "processing", "verdict": null,            "submitted_at": "2026-09-17T12:02:00Z" },
-      { "job_id": "JOB-001", "state": "completed",  "verdict": "non-defective", "submitted_at": "2026-09-17T12:00:00Z" }
+      { "job_id": "JOB-001", "state": "completed",  "verdict": "pass", "submitted_at": "2026-09-17T12:00:00Z" }
     ]
   }
 }
