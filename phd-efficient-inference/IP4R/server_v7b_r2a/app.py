@@ -50,8 +50,9 @@ PROOF_DIR   = Path("/tmp/v7b_r2a_proofs")
 MAX_WORKERS = 2
 MAX_HISTORY = 100
 
-P1_MODEL   = os.environ.get("P1_MODEL",   str(_ROOT / "data/macro_dataset/runs/macro_test/weights/best.pt"))
-ELEM_MODEL = os.environ.get("ELEM_MODEL", str(_ROOT / "runs/phase2_elem_v1/weights/best.pt"))
+P1_MODEL     = os.environ.get("P1_MODEL",     str(_ROOT / "data/macro_dataset/runs/macro_test/weights/best.pt"))
+ELEM_MODEL   = os.environ.get("ELEM_MODEL",   str(_ROOT / "runs/phase2_elem_v1/weights/best.pt"))
+PUBLIC_HOST  = os.environ.get("PUBLIC_HOST",  "http://tangentthoughttech.com:8084")
 
 # Sample every Nth frame in Phase 3 — reduces CPU inference time ~3x with minimal accuracy impact
 P3_SAMPLE_STEP = 3
@@ -396,9 +397,8 @@ async def get_result(job_id: str = Query(...)):
 
     # completed
     r    = job["result"]
-    host = "http://ip4r-v7b.tangentthoughttech.com"
     proof_filename = f"frame_{r['proof_frame_idx']}.jpg"
-    image_url = f"{host}/proofs/{job_id}/{proof_filename}"
+    image_url = f"{PUBLIC_HOST}/proofs/{job_id}/{proof_filename}"
 
     return _ok("completed", "Inference completed successfully", {
         "job_id":            job_id,
