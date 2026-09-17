@@ -67,6 +67,12 @@ _executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 app = FastAPI(title="IP4R v7b-r2a Inference Server", version="1.0.0")
 
 
+# ── Timestamp helper — ISO 8601 with Z suffix, no microseconds ────────────────
+
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 # ── Standard envelope helpers ─────────────────────────────────────────────────
 
 def _ok(status: str, message: str, data: dict) -> JSONResponse:
@@ -231,6 +237,14 @@ def _run_and_capture(video_path: str, job_id: str) -> dict:
         proof_path = str(proof_dir / proof_filename)
         cv2.imwrite(proof_path, proof_frame)
 
+    # Bounding box of the highest-confidence required-icon detection on the proof frame
+    proof_bbox = None
+    for nm, cf, bx in sorted(frame_dets.get(best_fi, []), key=lambda x: -x[1]):
+        if nm in REQUIRED_ICONS:
+            x1, y1, x2, y2 = [int(v) for v in bx]
+            proof_bbox = {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}
+            break
+
     found = [n for n in REQUIRED_ICONS if checklist[n] is not None]
     conf  = _confidence(verdict, checklist, fail_icons)
     t_sec = best_fi / fps
@@ -252,6 +266,7 @@ def _run_and_capture(video_path: str, job_id: str) -> dict:
         "proof_frame_idx": best_fi,
         "proof_frame_ts":  _ts(t_sec),
         "proof_path":      proof_path,
+        "proof_bbox":      proof_bbox,
         "defect_type":     ("icon_absence" if verdict == "FAIL"
                             else "icon_flicker" if verdict == "ABSTAIN"
                             else "all_present"),
@@ -263,7 +278,7 @@ def _run_and_capture(video_path: str, job_id: str) -> dict:
 def _process(job_id: str, video_path: str, defect_hint: str):
     with _lock:
         _jobs[job_id]["state"] = "processing"
-        _jobs[job_id]["started_at"] = datetime.now(timezone.utc).isoformat()
+        _jobs[job_id]["started_at"] = _utcnow()
 
     try:
         result = _run_and_capture(video_path, job_id)
@@ -271,7 +286,7 @@ def _process(job_id: str, video_path: str, defect_hint: str):
             _jobs[job_id].update({
                 "state":        "completed",
                 "result":       result,
-                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": _utcnow(),
                 "error":        None,
             })
     except Exception as e:
@@ -279,7 +294,7 @@ def _process(job_id: str, video_path: str, defect_hint: str):
             _jobs[job_id].update({
                 "state":        "job_failed",
                 "result":       None,
-                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": _utcnow(),
                 "error":        str(e),
             })
     finally:
@@ -327,7 +342,7 @@ async def submit_job(
     with open(video_path, "wb") as f:
         f.write(await video.read())
 
-    submitted_at = datetime.now(timezone.utc).isoformat()
+    submitted_at = _utcnow()
     with _lock:
         _jobs[jid] = {
             "state":        "queued",
@@ -392,7 +407,7 @@ async def get_result(job_id: str = Query(...)):
             "frame_index":        r["proof_frame_idx"],
             "timestamp_in_video": r["proof_frame_ts"],
             "image_url":          image_url,
-            "bounding_box":       None,
+            "bounding_box":       r.get("proof_bbox"),
             "defect_type":        r["defect_type"],
         },
         "detail": {
@@ -412,7 +427,16 @@ async def get_status(rows: int = Query(...)):
         return _err("invalid_parameter",
                     "Parameter 'rows' must be an integer between 1 and 100")
     with _lock:
-        recent = list(_history)[:rows]
+        # Active jobs (queued / processing) shown first, then completed history
+        active = [
+            {"job_id": jid, **job}
+            for jid, job in _jobs.items()
+            if job["state"] in ("queued", "processing")
+        ]
+        history = list(_history)
+
+    combined = active + history
+    recent = combined[:rows]
 
     jobs_out = []
     for j in recent:
