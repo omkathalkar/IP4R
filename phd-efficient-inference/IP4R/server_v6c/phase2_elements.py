@@ -314,6 +314,9 @@ def calibrate_elements(
         if not p1.complete or p1.T_star is None:
             log.warning("    Phase1 FAIL — skipping")
             continue
+        if p1.T_star < 5:
+            log.warning("    T*=%d < 5 frames (pre-splash fallback) — skipping to avoid dark-frame contamination", p1.T_star)
+            continue
 
         cap = cv2.VideoCapture(str(vid))
         cap.set(cv2.CAP_PROP_POS_FRAMES, p1.T_star)

@@ -111,9 +111,17 @@ def main() -> None:
     ap.add_argument("--yolo-model",    required=True,  help="Path to YOLO best.pt")
     ap.add_argument("--phase3-model",  required=True,  help="Path to models/v6a/best.pth")
 
-    # ── New primary Phase 2: Elements (2A) + AnomalyDINO (2B) ───────────────
+    # ── New primary Phase 2A: YOLO element detector ─────────────────────────
+    ap.add_argument("--phase2-yolo-elements", action="store_true",
+                    help="Enable Phase 2A YOLO element-detection check (replaces fill-factor)")
+    ap.add_argument("--yolo-elements-model", default=None,
+                    help="Path to trained element YOLO best.pt (runs/phase2_elem_v1/weights/best.pt)")
+    ap.add_argument("--yolo-elements-conf-thr", type=float, default=0.25,
+                    help="YOLO confidence threshold for element detection (default 0.25)")
+
+    # ── New primary Phase 2: Elements fill-factor (2A) + AnomalyDINO (2B) ───
     ap.add_argument("--phase2-elements",    action="store_true",
-                    help="Enable Phase 2A per-element presence check")
+                    help="Enable Phase 2A per-element fill-factor presence check")
     ap.add_argument("--element-thresholds", default=None,
                     help="Path to element_thresholds.json (calibrated on Jul-14+Sep-09 GOOD)")
     ap.add_argument("--elements-weak-k",    type=int,   default=3,
@@ -167,6 +175,9 @@ def main() -> None:
     pipe = V6cPipeline(
         yolo_model_path                  = args.yolo_model,
         phase3_model_path                = args.phase3_model,
+        use_phase2_yolo_elements         = args.phase2_yolo_elements,
+        yolo_elements_model_path         = args.yolo_elements_model,
+        yolo_elements_conf_thr           = args.yolo_elements_conf_thr,
         use_phase2_elements              = args.phase2_elements,
         elements_threshold_path          = args.element_thresholds,
         elements_weak_k                  = args.elements_weak_k,
@@ -208,6 +219,7 @@ def main() -> None:
 
     sep = "─" * 88
     # Build column header based on enabled checks
+    p2yolo_col = "  P2YOLO" if args.phase2_yolo_elements else ""
     p2elem_col = "  P2ELEM" if args.phase2_elements   else ""
     p2dino_col = "  P2DINO" if args.phase2_dino        else ""
     p2ssim_col = "  P2SSIM" if args.phase2_ssim        else ""
@@ -216,16 +228,19 @@ def main() -> None:
     p3_col     = "" if (args.phase2_elements or args.phase2_dino) else " {'P3_pf':>7}"
     hdr = (
         f"{'Video':<22} {'GT':>8} {'Verdict':>8} {'P1':>4}"
-        f"{p2elem_col}{p2dino_col}{p2ssim_col}{p2tmpl_col}{p2roi_col}"
+        f"{p2yolo_col}{p2elem_col}{p2dino_col}{p2ssim_col}{p2tmpl_col}{p2roi_col}"
         f" {'P3_pf':>7} {'ms':>6} {'OK':>3}"
     )
 
     print(f"\n{sep}")
     print(f"  v6c  —  {args.name}")
     print(f"  YOLO: {Path(args.yolo_model).name}   Phase3: {Path(args.phase3_model).name}")
+    if args.phase2_yolo_elements:
+        mdl_name = Path(args.yolo_elements_model).name if args.yolo_elements_model else "MISSING"
+        print(f"  Phase2A YOLO Elements: {mdl_name}  conf_thr={args.yolo_elements_conf_thr}")
     if args.phase2_elements:
         thr_name = Path(args.element_thresholds).name if args.element_thresholds else "MISSING"
-        print(f"  Phase2A Elements: {thr_name}  weak_k={args.elements_weak_k}")
+        print(f"  Phase2A Fill Elements: {thr_name}  weak_k={args.elements_weak_k}")
     if args.phase2_dino:
         bank_name = Path(args.dino_bank).name if args.dino_bank else "MISSING"
         thr_name  = Path(args.dino_thr).name  if args.dino_thr  else "MISSING"
@@ -252,9 +267,10 @@ def main() -> None:
 
         result  = pipe.predict(vid)
         verdict = result["verdict"]
-        p1      = result["phase1"]
-        p2_elem = result.get("phase2_elements")
-        p2_dino = result.get("phase2_dino")
+        p1           = result["phase1"]
+        p2_yolo_elem = result.get("phase2_yolo_elements")
+        p2_elem      = result.get("phase2_elements")
+        p2_dino      = result.get("phase2_dino")
         p2_ssim = result.get("phase2_ssim")
         p2_tmpl = result.get("phase2_template")
         p2_roi  = result.get("phase2_roi")
@@ -263,6 +279,13 @@ def main() -> None:
         p1_ok  = "✓" if p1 and p1.get("complete") else "✗"
         p3_pf  = f"{p3['median_prob_fail']:.3f}" if p3 else "  N/A"
         ms_s   = f"{result['inference_ms']:.0f}"
+
+        p2yolo_s = ""
+        if args.phase2_yolo_elements:
+            if p2_yolo_elem:
+                p2yolo_s = f"  {p2_yolo_elem['verdict'][:4]:>6}"
+            else:
+                p2yolo_s = f"  {'N/A':>6}"
 
         p2elem_s = ""
         if args.phase2_elements:
@@ -307,7 +330,7 @@ def main() -> None:
 
         print(
             f"  {vid.stem:<22} {gt_s:>8} {verdict:>8} {p1_ok:>4}"
-            f"{p2elem_s}{p2dino_s}{p2ssim_s}{p2tmpl_s}{p2roi_s}"
+            f"{p2yolo_s}{p2elem_s}{p2dino_s}{p2ssim_s}{p2tmpl_s}{p2roi_s}"
             f" {p3_pf:>7} {ms_s:>6} {ok_sym:>3}"
         )
 
@@ -317,7 +340,12 @@ def main() -> None:
             confs   = {c: f"{p1['checklist'].get(c, 0):.2f}" for c in missing}
             print(f"    [Phase1 FAIL] missing={missing}  best_conf={confs}")
 
-        # Phase 2A elements failure detail
+        # Phase 2A YOLO elements failure detail
+        if p2_yolo_elem and not p2_yolo_elem["passed"]:
+            miss = p2_yolo_elem.get("confident_miss", [])
+            print(f"    [P2YOLO FAIL] confident_miss={miss}")
+
+        # Phase 2A fill-factor elements failure detail
         if p2_elem and not p2_elem["passed"]:
             miss = p2_elem.get("confident_miss", [])
             weak = p2_elem.get("weak_elements", [])
@@ -364,7 +392,10 @@ def main() -> None:
             "passed":  result["passed"],
             "correct": is_correct,
             "failed_at": result.get("failed_at"),
-            # Phase 2A elements
+            # Phase 2A YOLO elements
+            "phase2_yolo_elements_verdict": p2_yolo_elem.get("verdict") if p2_yolo_elem else None,
+            "phase2_yolo_elements_miss":    p2_yolo_elem.get("confident_miss") if p2_yolo_elem else None,
+            # Phase 2A fill-factor elements
             "phase2_elements_verdict":   p2_elem.get("verdict") if p2_elem else None,
             "phase2_elements_miss":      p2_elem.get("confident_miss") if p2_elem else None,
             "phase2_elements_weak":      p2_elem.get("weak_elements") if p2_elem else None,
@@ -404,6 +435,9 @@ def main() -> None:
         "name":                  args.name,
         "yolo_model":            str(args.yolo_model),
         "phase3_model":          str(args.phase3_model),
+        "phase2_yolo_elements":  args.phase2_yolo_elements,
+        "yolo_elements_model":   str(args.yolo_elements_model) if args.yolo_elements_model else None,
+        "yolo_elements_conf_thr": args.yolo_elements_conf_thr,
         "phase2_elements":       args.phase2_elements,
         "element_thresholds":    str(args.element_thresholds) if args.element_thresholds else None,
         "elements_weak_k":       args.elements_weak_k,

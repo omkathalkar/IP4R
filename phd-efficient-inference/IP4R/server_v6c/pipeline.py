@@ -50,9 +50,12 @@ class V6cPipeline:
         yolo_model_path:      str | Path,
         phase3_model_path:    str | Path,
         # ── New primary Phase 2: per-element presence (2A) + AnomalyDINO (2B) ──
-        use_phase2_elements:      bool            = False,
-        elements_threshold_path:  str | Path | None = None,
-        use_phase2_dino:          bool            = False,
+        use_phase2_yolo_elements:  bool            = False,
+        yolo_elements_model_path:  str | Path | None = None,
+        yolo_elements_conf_thr:    float           = 0.25,
+        use_phase2_elements:       bool            = False,
+        elements_threshold_path:   str | Path | None = None,
+        use_phase2_dino:           bool            = False,
         dino_bank_path:           str | Path | None = None,
         dino_thr_path:            str | Path | None = None,
         dino_model_id:            str             = "facebook/dinov2-small",
@@ -79,6 +82,9 @@ class V6cPipeline:
     ):
         self.yolo_model_path             = Path(yolo_model_path)
         self.phase3_model_path           = Path(phase3_model_path)
+        self.use_phase2_yolo_elements    = use_phase2_yolo_elements
+        self.yolo_elements_model_path    = Path(yolo_elements_model_path) if yolo_elements_model_path else None
+        self.yolo_elements_conf_thr      = yolo_elements_conf_thr
         self.use_phase2_elements         = use_phase2_elements
         self.elements_threshold_path     = Path(elements_threshold_path) if elements_threshold_path else None
         self.use_phase2_dino             = use_phase2_dino
@@ -125,9 +131,10 @@ class V6cPipeline:
             phase3           : Phase3Result as dict (or None)
             inference_ms     : total wall-clock time in ms
         """
-        from .yolo_phase1     import run_yolo_phase1
-        from .phase2_elements import run_phase2_elements
-        from .phase2_dino     import run_phase2_dino
+        from .yolo_phase1           import run_yolo_phase1
+        from .phase2_yolo_elements  import run_phase2_yolo_elements
+        from .phase2_elements       import run_phase2_elements
+        from .phase2_dino           import run_phase2_dino
         from .phase2_masked   import run_phase2
         from .phase2_roi      import run_phase2_roi
         from .phase2_template import run_phase2_template
@@ -160,13 +167,35 @@ class V6cPipeline:
                 "inference_ms":    round(ms, 1),
             }
 
-        # ── Phase 2: Elements (2A) + AnomalyDINO (2B) — new primary path ────
-        # Both checks run independently; OR-gate determines failure.
+        # ── Phase 2: YOLO elements (2A-yolo) + fill elements (2A-fill) + DINO (2B) ──
+        # All run independently; OR-gate determines failure.
         # No AMBIGUOUS tier — returns PASS/FAIL directly, skips Phase 3.
-        if self.use_phase2_elements or self.use_phase2_dino:
-            p2_elem_dict = None
-            p2_dino_dict = None
-            failed_at    = None
+        if self.use_phase2_yolo_elements or self.use_phase2_elements or self.use_phase2_dino:
+            p2_yolo_elem_dict = None
+            p2_elem_dict      = None
+            p2_dino_dict      = None
+            failed_at         = None
+
+            if self.use_phase2_yolo_elements and self.yolo_elements_model_path is not None:
+                p2_yolo_elem = run_phase2_yolo_elements(
+                    video_path   = video_path,
+                    T_star       = p1.T_star,
+                    model_path   = self.yolo_elements_model_path,
+                    conf_thr     = self.yolo_elements_conf_thr,
+                    fps          = self.fps,
+                )
+                p2_yolo_elem_dict = {
+                    "passed":         p2_yolo_elem.passed,
+                    "verdict":        p2_yolo_elem.verdict,
+                    "confident_miss": p2_yolo_elem.confident_miss,
+                    "element_hits":   p2_yolo_elem.element_hits,
+                    "n_timepoints":   p2_yolo_elem.n_timepoints,
+                    "frame_indices":  p2_yolo_elem.frame_indices,
+                    "conf_thr":       p2_yolo_elem.conf_thr,
+                    "error":          p2_yolo_elem.error,
+                }
+                if not p2_yolo_elem.passed:
+                    failed_at = "phase2_yolo_elements"
 
             if self.use_phase2_elements and self.elements_threshold_path is not None:
                 p2_elem = run_phase2_elements(
@@ -178,7 +207,7 @@ class V6cPipeline:
                     weak_k          = self.elements_weak_k,
                 )
                 p2_elem_dict = asdict(p2_elem)
-                if not p2_elem.passed:
+                if not p2_elem.passed and failed_at is None:
                     failed_at = "phase2_elements"
 
             if self.use_phase2_dino and self.dino_bank_path is not None and self.dino_thr_path is not None:
@@ -198,18 +227,19 @@ class V6cPipeline:
 
             ms = (time.perf_counter() - t0) * 1000
             return {
-                "verdict":         "FAIL" if failed_at else "PASS",
-                "passed":          failed_at is None,
-                "failed_at":       failed_at,
-                "phase1":          asdict(p1),
-                "phase2_elements": p2_elem_dict,
-                "phase2_dino":     p2_dino_dict,
-                "phase2_ssim":     None,
-                "phase2_template": None,
-                "phase2_roi":      None,
-                "phase2":          None,
-                "phase3":          None,
-                "inference_ms":    round(ms, 1),
+                "verdict":              "FAIL" if failed_at else "PASS",
+                "passed":               failed_at is None,
+                "failed_at":            failed_at,
+                "phase1":               asdict(p1),
+                "phase2_yolo_elements": p2_yolo_elem_dict,
+                "phase2_elements":      p2_elem_dict,
+                "phase2_dino":          p2_dino_dict,
+                "phase2_ssim":          None,
+                "phase2_template":      None,
+                "phase2_roi":           None,
+                "phase2":               None,
+                "phase3":               None,
+                "inference_ms":         round(ms, 1),
             }
 
         # ── Legacy Phase 2 paths ─────────────────────────────────────────────
