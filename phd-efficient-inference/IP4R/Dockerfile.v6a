@@ -1,0 +1,25 @@
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY server_v6a/requirements.txt ./requirements.txt 2>/dev/null || true
+RUN pip install --no-cache-dir \
+    fastapi>=0.110.0 \
+    uvicorn>=0.29.0 \
+    opencv-python-headless>=4.9.0 \
+    numpy>=1.26.0 \
+    python-multipart>=0.0.9 \
+    torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+COPY server_v6a/ ./server_v6a/
+
+ENV V6A_MODEL=/models/v6a_best.pth
+ENV PUBLIC_HOST=http://tangentthoughttech.com:8083
+
+EXPOSE 8083
+
+CMD ["python", "-m", "uvicorn", "server_v6a.app:app", "--host", "0.0.0.0", "--port", "8083"]
