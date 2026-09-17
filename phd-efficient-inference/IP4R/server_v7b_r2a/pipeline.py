@@ -150,13 +150,14 @@ def _infer_batch(
     frames: list[np.ndarray],
     indices: list[int],
     conf: float = P3_CONF_THR,
+    imgsz: int = 640,
 ) -> dict[int, list[tuple[str, float, list]]]:
     out: dict[int, list] = {}
     bs = BATCH_SIZE if BATCH_SIZE > 0 else len(frames)
     for start in range(0, len(frames), bs):
         batch_frm = frames[start:start + bs]
         batch_idx = indices[start:start + bs]
-        preds = m2.predict(batch_frm, conf=conf, imgsz=640, verbose=False)
+        preds = m2.predict(batch_frm, conf=conf, imgsz=imgsz, verbose=False)
         for pred, fi in zip(preds, batch_idx):
             dets: list[tuple[str, float, list]] = []
             if pred and len(pred.boxes):

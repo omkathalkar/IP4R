@@ -53,6 +53,10 @@ MAX_HISTORY = 100
 P1_MODEL   = os.environ.get("P1_MODEL",   str(_ROOT / "data/macro_dataset/runs/macro_test/weights/best.pt"))
 ELEM_MODEL = os.environ.get("ELEM_MODEL", str(_ROOT / "runs/phase2_elem_v1/weights/best.pt"))
 
+# Sample every Nth frame in Phase 3 — reduces CPU inference time ~3x with minimal accuracy impact
+P3_SAMPLE_STEP = 3
+INFER_IMGSZ    = 480  # smaller than default 640 → ~2x faster per YOLO call on CPU
+
 VALID_DEFECT = {"defective", "non-defective"}
 
 for _d in (UPLOAD_DIR, PROOF_DIR):
@@ -134,7 +138,7 @@ def _run_and_capture(video_path: str, job_id: str) -> dict:
         cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
         ok, frm = cap.read()
         if ok:
-            preds = m1.predict(frm, conf=P1_CONF_THR, imgsz=640, verbose=False)
+            preds = m1.predict(frm, conf=P1_CONF_THR, imgsz=INFER_IMGSZ, verbose=False)
             if preds and len(preds[0].boxes):
                 for i in range(len(preds[0].boxes)):
                     cid = int(preds[0].boxes.cls[i].item())
@@ -173,7 +177,7 @@ def _run_and_capture(video_path: str, job_id: str) -> dict:
             x1, y1, x2, y2 = bx
             masked[max(0, y1 - PAD):y2 + PAD, max(0, x1 - PAD):x2 + PAD] = 255
         masked_norm = _normalize_frame(masked)
-        preds = m2.predict(masked_norm, conf=P2_CONF_THR, imgsz=640, verbose=False)
+        preds = m2.predict(masked_norm, conf=P2_CONF_THR, imgsz=INFER_IMGSZ, verbose=False)
         if preds and len(preds[0].boxes):
             for i in range(len(preds[0].boxes)):
                 cid = int(preds[0].boxes.cls[i].item())
@@ -181,12 +185,12 @@ def _run_and_capture(video_path: str, job_id: str) -> dict:
                     anomalous.append(ELEMENT_NAMES[cid])
     p2_flag = P2_FLAG_ENABLED and any(n in REQUIRED_ICONS for n in anomalous)
 
-    # Phase 3 — collect + batch infer
+    # Phase 3 — collect + batch infer (sample every P3_SAMPLE_STEP frames)
     p3_raw:  list[np.ndarray] = []
     p3_norm: list[np.ndarray] = []
     p3_idx:  list[int]        = []
     cap = cv2.VideoCapture(str(vp))
-    for fi in range(f_p3_start, n_frames):
+    for fi in range(f_p3_start, n_frames, P3_SAMPLE_STEP):
         cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
         ok3, frm = cap.read()
         if not ok3:
@@ -197,7 +201,7 @@ def _run_and_capture(video_path: str, job_id: str) -> dict:
     cap.release()
 
     p3_thr      = _adaptive_thr(p3_raw)
-    frame_dets  = _infer_batch(m2, p3_norm, p3_idx, conf=p3_thr)
+    frame_dets  = _infer_batch(m2, p3_norm, p3_idx, conf=p3_thr, imgsz=INFER_IMGSZ)
     checklist, glimpsed = _apply_temporal_glimpse(frame_dets, p3_idx, p3_thr)
     verdict, abstain_icons, fail_icons = _three_way_verdict(checklist, glimpsed)
 
