@@ -1,79 +1,71 @@
 # IP4R v7b-r2a — AC Remote LCD Inspection API
 
 **API Base URL:** `http://<host>/api/v1/inference`  
-**Default port:** 8084  
-**Model version:** v7b-r2a
+**Default port:** 8084 · **Model version:** v7b-r2a
 
 ---
 
-## Deployment (Docker)
+## Setup & Run (on the server)
 
-### 1. Prerequisites
-
-- Docker + Docker Compose installed
-- Two YOLO model files (obtain from T3):
-  - `p1_best.pt` — Phase 1 macro model (5-class)
-  - `elem_best.pt` — Phase 3 element model (21-class)
-
----
-
-### 2. Get the code
+### Step 1 — Clone the repo
 
 ```bash
-git clone https://github.com/omkathalkar/IP4R.git
+git clone -b main_deploy https://github.com/omkathalkar/IP4R.git
 cd IP4R/phd-efficient-inference/IP4R
 ```
 
----
-
-### 3. Place model files
+### Step 2 — Install dependencies
 
 ```bash
-mkdir -p models
-cp /path/to/p1_best.pt   models/p1_best.pt
-cp /path/to/elem_best.pt models/elem_best.pt
+pip install -r server_v7b_r2a/requirements.txt
 ```
 
-The directory should look like:
-```
-phd-efficient-inference/IP4R/
-├── Dockerfile.v7b_r2a
-├── docker-compose.v7b_r2a.yml
-├── models/
-│   ├── p1_best.pt
-│   └── elem_best.pt
-└── server_v7b_r2a/
-    ├── app.py
-    ├── pipeline.py
-    └── ...
-```
-
----
-
-### 4. Build and run
+### Step 3 — Set model paths
 
 ```bash
-docker-compose -f docker-compose.v7b_r2a.yml up -d --build
+export P1_MODEL=/path/to/p1_best.pt
+export ELEM_MODEL=/path/to/elem_best.pt
 ```
 
----
+### Step 4 — Start the server
 
-### 5. Verify it's running
+```bash
+nohup python -m uvicorn server_v7b_r2a.app:app --host 0.0.0.0 --port 8084 > server.log 2>&1 &
+echo "Server PID: $!"
+```
+
+### Step 5 — Verify
 
 ```bash
 curl http://localhost:8084/health
 ```
 
-Expected response:
+Expected:
 ```json
 { "status": "ok", "version": "v7b-r2a", "pending": 0, "processing": 0 }
 ```
 
 ---
 
-### 6. Nginx reverse proxy
+### Other commands
 
-Nginx sits in front of the container and proxies port 80 → 8084. Add this server block to your nginx config:
+```bash
+# View logs
+tail -f server.log
+
+# Stop server
+pkill -f server_v7b_r2a
+
+# Restart
+pkill -f server_v7b_r2a
+nohup python -m uvicorn server_v7b_r2a.app:app --host 0.0.0.0 --port 8084 > server.log 2>&1 &
+```
+
+---
+
+### Nginx reverse proxy
+
+Proxy port 80 → 8084. Add this block to your nginx config and reload:
 
 ```nginx
 server {
@@ -93,29 +85,8 @@ server {
 }
 ```
 
-Then reload nginx:
 ```bash
 nginx -s reload
-# or if using Docker nginx:
-docker exec <nginx-container> nginx -s reload
-```
-
----
-
-### Other useful commands
-
-```bash
-# View logs
-docker logs -f ip4r-v7b-r2a
-
-# Stop
-docker-compose -f docker-compose.v7b_r2a.yml down
-
-# Restart
-docker-compose -f docker-compose.v7b_r2a.yml restart
-
-# Rebuild after code change
-docker-compose -f docker-compose.v7b_r2a.yml up -d --build
 ```
 
 ---
@@ -124,7 +95,7 @@ docker-compose -f docker-compose.v7b_r2a.yml up -d --build
 
 ### POST /api/v1/inference/submit-job
 
-Submit a video. Returns immediately with a `job_id`. Non-blocking.
+Submit a video. Non-blocking — returns `job_id` immediately.
 
 **Content-Type:** `multipart/form-data`
 
@@ -159,18 +130,18 @@ curl -X POST "http://<host>/api/v1/inference/submit-job" \
 
 ### GET /api/v1/inference/result?job_id=JOB-001
 
-Poll for result. Processing takes ~90–120 s. Poll every 3–5 s.
+Poll every 3–5 s until `status == "completed"`. Processing takes ~90–120 s.
+
+```bash
+curl "http://<host>/api/v1/inference/result?job_id=JOB-001"
+```
 
 **While processing:**
 ```json
-{
-  "success": true,
-  "status": "processing",
-  "data": { "job_id": "JOB-001", "submitted_at": "2026-09-18T08:00:00Z" }
-}
+{ "success": true, "status": "processing", "data": { "job_id": "JOB-001" } }
 ```
 
-**When done — key fields: `verdict` and `proof.image_url`:**
+**Completed — the two key fields are `verdict` and `proof.image_url`:**
 ```json
 {
   "success": true,
@@ -213,17 +184,9 @@ Poll for result. Processing takes ~90–120 s. Poll every 3–5 s.
 | `"fail"` | At least one icon was never detected — confident defect |
 | `"abstain"` | Icons seen but not stable — send to human re-inspection |
 
-| `defect_type` | Verdict | Meaning |
-|---------------|---------|---------|
-| `all_present` | pass | Every icon confirmed |
-| `icon_flicker` | abstain | Icons glimpsed but not 2 consecutive frames |
-| `icon_absence` | fail | One or more icons never detected |
-
 ---
 
 ### GET /api/v1/inference/status?rows=10
-
-Recent jobs (active + completed).
 
 ```bash
 curl "http://<host>/api/v1/inference/status?rows=10"
@@ -245,12 +208,6 @@ curl "http://<host>/api/v1/inference/status?rows=10"
 
 ---
 
-### GET /proofs/{job_id}/{filename}
-
-Serves the annotated proof frame JPEG. The full URL is in `proof.image_url` — fetch it directly.
-
----
-
 ### GET /health
 
 ```json
@@ -259,37 +216,15 @@ Serves the annotated proof frame JPEG. The full URL is in `proof.image_url` — 
 
 ---
 
-## Standard response envelope
-
-Every response:
-```json
-{ "success": true|false, "status": "<code>", "message": "<text>", "data": {} }
-```
-
----
-
-## Recommended integration flow
+## Integration flow
 
 ```
 POST /submit-job  →  save job_id
 
 loop every 3–5 s:
   GET /result?job_id=<id>
-    "processing"  → keep polling
-    "completed"   → read data.verdict + data.proof.image_url  ✓
-    "job_failed"  → read data.error_detail
-    success=false → read status field for error code
+    "processing"  →  keep polling
+    "completed"   →  read data.verdict + data.proof.image_url  ✓
+    "job_failed"  →  read data.error_detail
+    success=false →  read status field for error code
 ```
-
----
-
-## Web UI
-
-Open `http://<host>/` in a browser — drag-and-drop upload, live verdict, icon breakdown, proof frame preview.
-
----
-
-## Source
-
-Server code: [`phd-efficient-inference/IP4R/server_v7b_r2a/`](phd-efficient-inference/IP4R/server_v7b_r2a/)  
-Docker files: [`Dockerfile.v7b_r2a`](phd-efficient-inference/IP4R/Dockerfile.v7b_r2a) · [`docker-compose.v7b_r2a.yml`](phd-efficient-inference/IP4R/docker-compose.v7b_r2a.yml)
