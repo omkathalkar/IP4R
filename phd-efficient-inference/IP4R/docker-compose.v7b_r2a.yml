@@ -1,0 +1,24 @@
+version: '3.9'
+
+services:
+  ip4r-v7b:
+    build:
+      context: .
+      dockerfile: Dockerfile.v7b_r2a
+    image: ip4r-v7b-r2a:latest
+    container_name: ip4r-v7b-r2a
+    ports:
+      - "8084:8084"
+    volumes:
+      - ./models/p1_best.pt:/models/p1_best.pt:ro
+      - ./models/elem_best.pt:/models/elem_best.pt:ro
+      - ip4r_proofs:/tmp/v7b_r2a_proofs
+      - ip4r_uploads:/tmp/v7b_r2a_uploads
+    environment:
+      - P1_MODEL=/models/p1_best.pt
+      - ELEM_MODEL=/models/elem_best.pt
+    restart: unless-stopped
+
+volumes:
+  ip4r_proofs:
+  ip4r_uploads:

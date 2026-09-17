@@ -50,8 +50,8 @@ PROOF_DIR   = Path("/tmp/v7b_r2a_proofs")
 MAX_WORKERS = 2
 MAX_HISTORY = 100
 
-P1_MODEL   = str(_ROOT / "data/macro_dataset/runs/macro_test/weights/best.pt")
-ELEM_MODEL = str(_ROOT / "runs/phase2_elem_v1/weights/best.pt")
+P1_MODEL   = os.environ.get("P1_MODEL",   str(_ROOT / "data/macro_dataset/runs/macro_test/weights/best.pt"))
+ELEM_MODEL = os.environ.get("ELEM_MODEL", str(_ROOT / "runs/phase2_elem_v1/weights/best.pt"))
 
 VALID_DEFECT = {"defective", "non-defective"}
 
