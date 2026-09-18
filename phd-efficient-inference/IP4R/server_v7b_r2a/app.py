@@ -27,6 +27,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from typing import Optional
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
@@ -315,17 +316,17 @@ def _process(job_id: str, video_path: str, defect_hint: str):
 
 @app.post("/api/v1/inference/submit-job")
 async def submit_job(
-    video:  UploadFile = File(...),
-    job_id: str        = Form(default=""),
-    defect: str        = Form(default="unclassified"),
+    video:  Optional[UploadFile] = File(default=None),
+    job_id: str                  = Form(default=""),
+    defect: str                  = Form(default="unclassified"),
 ):
-    # Validate defect
+    # Validate defect first (before touching the file)
     if defect not in VALID_DEFECT and defect != "unclassified":
         return _err("invalid_parameter",
                     "Field 'defect' must be one of: defective, non-defective")
 
     # Validate file
-    if not video.filename:
+    if video is None or not video.filename:
         return _err("missing_file", "No video file found in the request")
     ext = Path(video.filename).suffix.lower()
     if ext not in {".mp4", ".avi", ".mov", ".mkv"}:
@@ -426,10 +427,15 @@ async def get_result(job_id: str = Query(...)):
 
 
 @app.get("/api/v1/inference/status")
-async def get_status(rows: int = Query(...)):
-    if rows < 1 or rows > 100:
+async def get_status(rows: Optional[str] = Query(default=None)):
+    try:
+        rows_int = int(rows) if rows is not None else None
+    except (ValueError, TypeError):
+        rows_int = None
+    if rows_int is None or rows_int < 1 or rows_int > 100:
         return _err("invalid_parameter",
                     "Parameter 'rows' must be an integer between 1 and 100")
+    rows = rows_int
     with _lock:
         # Active jobs (queued / processing) shown first, then completed history
         active = [
