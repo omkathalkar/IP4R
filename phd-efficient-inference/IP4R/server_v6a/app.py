@@ -19,6 +19,7 @@ from pathlib import Path
 
 import cv2
 
+from typing import Optional
 from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
@@ -35,7 +36,8 @@ PROOF_DIR   = Path("/tmp/v6a_proofs")
 MAX_WORKERS = 2
 MAX_HISTORY = 100
 
-V6A_MODEL   = os.environ.get("V6A_MODEL", str(_ROOT / "models" / "v6a" / "best.pth"))
+V6A_MODEL   = os.environ.get("V6A_MODEL",   str(_ROOT / "models" / "v6a" / "best.pth"))
+PUBLIC_HOST = os.environ.get("PUBLIC_HOST", "http://tangentthoughttech.com:8083")
 VALID_DEFECT = {"defective", "non-defective"}
 
 for _d in (UPLOAD_DIR, PROOF_DIR):
@@ -122,7 +124,7 @@ def _run(video_path: str, job_id: str) -> dict:
     h = int(t_sec // 3600)
     m = int((t_sec % 3600) // 60)
     s = t_sec % 60
-    ts = f"{h:02d}:{m:02d}:{s:06.3f}"
+    ts = f"{h:02d}:{m:02d}:{s:05.2f}"
 
     # Bounding box: full splash crop (v6a classifies the whole frame)
     H = crop.shape[0] if crop is not None else 0
@@ -148,13 +150,13 @@ def _run(video_path: str, job_id: str) -> dict:
 
 @app.post("/api/v1/inference/submit-job")
 async def submit_job(
-    video:  UploadFile = File(...),
-    job_id: str        = Form(default=""),
-    defect: str        = Form(default="unclassified"),
+    video:  Optional[UploadFile] = File(default=None),
+    job_id: str                  = Form(default=""),
+    defect: str                  = Form(default="unclassified"),
 ):
     if defect not in VALID_DEFECT and defect != "unclassified":
         return _err("invalid_parameter", "Field 'defect' must be one of: defective, non-defective")
-    if not video.filename:
+    if video is None or not video.filename:
         return _err("missing_file", "No video file found in the request")
     ext = Path(video.filename).suffix.lower()
     if ext not in {".mp4", ".avi", ".mov", ".mkv"}:
@@ -167,7 +169,7 @@ async def submit_job(
                         {"job_id": jid})
 
     ts_str   = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    filename = f"{jid}_{ts_str}_{defect.replace('-','_')}{ext}"
+    filename = f"{jid}_{ts_str}_{defect}{ext}"
     vpath    = UPLOAD_DIR / filename
     with open(vpath, "wb") as f:
         f.write(await video.read())
@@ -212,8 +214,7 @@ async def get_result(job_id: str = Query(...)):
                     {"job_id": job_id, "error_detail": job.get("error", "")}, code=500)
 
     r    = job["result"]
-    host = os.environ.get("PUBLIC_HOST", "http://tangentthoughttech.com:8083")
-    image_url = f"{host}/proofs/{job_id}/splash.jpg" if r.get("proof_path") else None
+    image_url = f"{PUBLIC_HOST}/proofs/{job_id}/splash.jpg" if r.get("proof_path") else None
 
     return _ok("completed", "Inference completed successfully", {
         "job_id":            job_id,
@@ -239,9 +240,14 @@ async def get_result(job_id: str = Query(...)):
 
 
 @app.get("/api/v1/inference/status")
-async def get_status(rows: int = Query(...)):
-    if rows < 1 or rows > 100:
+async def get_status(rows: Optional[str] = Query(default=None)):
+    try:
+        rows_int = int(rows) if rows is not None else None
+    except (ValueError, TypeError):
+        rows_int = None
+    if rows_int is None or rows_int < 1 or rows_int > 100:
         return _err("invalid_parameter", "Parameter 'rows' must be an integer between 1 and 100")
+    rows = rows_int
     with _lock:
         active = [{"job_id": jid, **job}
                   for jid, job in _jobs.items()
