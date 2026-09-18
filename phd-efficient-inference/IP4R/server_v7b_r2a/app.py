@@ -111,7 +111,7 @@ def _ts(seconds: float) -> str:
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     s = seconds % 60
-    return f"{h:02d}:{m:02d}:{s:06.3f}"
+    return f"{h:02d}:{m:02d}:{s:05.2f}"
 
 
 def _run_and_capture(video_path: str, job_id: str) -> dict:
@@ -341,9 +341,8 @@ async def submit_job(
                         {"job_id": jid})
 
     # Save file using naming convention: <JOB-ID>_<timestamp>_<defect>.<ext>
-    ts_str      = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    defect_tag  = defect.replace("-", "_")
-    filename    = f"{jid}_{ts_str}_{defect_tag}{ext}"
+    ts_str   = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"{jid}_{ts_str}_{defect}{ext}"
     video_path  = UPLOAD_DIR / filename
     with open(video_path, "wb") as f:
         f.write(await video.read())
