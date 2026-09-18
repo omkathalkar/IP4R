@@ -1,71 +1,85 @@
-# IP4R v7b-r2a — AC Remote LCD Inspection API
+# IP4R — AC Remote LCD Inspection API
 
-**API Base URL:** `http://<host>/api/v1/inference`  
-**Default port:** 8084 · **Model version:** v7b-r2a
+Two models in production, both Dockerized with `--restart unless-stopped`:
+
+| Model | Port | URL | Description |
+|-------|------|-----|-------------|
+| **v7b-r2a** (YOLO) | 8084 | `http://tangentthoughttech.com:8084` | Primary — 3-phase YOLO pipeline, PASS/ABSTAIN/FAIL |
+| **v6a** (EfficientNet-B0) | 8083 | `http://tangentthoughttech.com:8083` | Secondary — single-frame CNN classifier |
+
+Both servers implement the same **Inference API V1** spec (endpoints, envelope, verdicts).
 
 ---
 
-## Setup & Run (on the server)
+## Quick health check
+
+```bash
+curl http://tangentthoughttech.com:8084/health
+# {"status":"ok","version":"v7b-r2a","pending":0,"processing":0}
+
+curl http://tangentthoughttech.com:8083/health
+# {"status":"ok","version":"v6a","model":"EfficientNet-B0","pending":0,"processing":0}
+```
+
+---
+
+## Server-side setup (v7b-r2a on port 8084)
+
+> One-time deployment on the production server. Docker must be installed.
 
 ### Step 1 — Clone the repo
 
 ```bash
 git clone -b main_deploy https://github.com/omkathalkar/IP4R.git
-cd IP4R/phd-efficient-inference/IP4R
+cd IP4R
 ```
 
-### Step 2 — Install dependencies
+### Step 2 — Place model weights
 
 ```bash
-pip install -r server_v7b_r2a/requirements.txt
+mkdir -p models
+# copy your weights files into models/
+# p1_best.pt  → Phase 1 macro YOLO
+# elem_best.pt → Phase 2/3 element YOLO
 ```
 
-### Step 3 — Set model paths
+### Step 3 — Build and run
 
 ```bash
-export P1_MODEL=/path/to/p1_best.pt
-export ELEM_MODEL=/path/to/elem_best.pt
+docker build -f Dockerfile.v7b_r2a -t ip4r-v7b-r2a:latest .
+
+docker run -d --name ip4r_v7b_r2a \
+  -p 8084:8084 \
+  -v $(pwd)/models/p1_best.pt:/models/p1_best.pt:ro \
+  -v $(pwd)/models/elem_best.pt:/models/elem_best.pt:ro \
+  -v ip4r_v7b_proofs:/tmp/v7b_r2a_proofs \
+  -v ip4r_v7b_uploads:/tmp/v7b_r2a_uploads \
+  -e P1_MODEL=/models/p1_best.pt \
+  -e ELEM_MODEL=/models/elem_best.pt \
+  -e PUBLIC_HOST=http://<your-host>:8084 \
+  --restart unless-stopped \
+  ip4r-v7b-r2a:latest
 ```
 
-### Step 4 — Start the server
-
-```bash
-nohup python -m uvicorn server_v7b_r2a.app:app --host 0.0.0.0 --port 8084 > server.log 2>&1 &
-echo "Server PID: $!"
-```
-
-### Step 5 — Verify
+### Step 4 — Verify
 
 ```bash
 curl http://localhost:8084/health
+# {"status":"ok","version":"v7b-r2a","pending":0,"processing":0}
 ```
 
-Expected:
-```json
-{ "status": "ok", "version": "v7b-r2a", "pending": 0, "processing": 0 }
-```
-
----
-
-### Other commands
+### Manage the container
 
 ```bash
-# View logs
-tail -f server.log
-
-# Stop server
-pkill -f server_v7b_r2a
-
-# Restart
-pkill -f server_v7b_r2a
-nohup python -m uvicorn server_v7b_r2a.app:app --host 0.0.0.0 --port 8084 > server.log 2>&1 &
+docker ps --filter name=ip4r_v7b_r2a        # status
+docker logs ip4r_v7b_r2a -f                  # live logs
+docker restart ip4r_v7b_r2a                  # restart
+docker stop ip4r_v7b_r2a && docker rm ip4r_v7b_r2a  # remove
 ```
 
----
+### Nginx reverse proxy (optional)
 
-### Nginx reverse proxy
-
-Proxy port 80 → 8084. Add this block to your nginx config and reload:
+Proxy port 80 → 8084:
 
 ```nginx
 server {
@@ -93,6 +107,9 @@ nginx -s reload
 
 ## API Reference
 
+**Base URL:** `http://<host>:8084/api/v1/inference`  
+**GUI dashboard:** `http://<host>:8084/`
+
 ### POST /api/v1/inference/submit-job
 
 Submit a video. Non-blocking — returns `job_id` immediately.
@@ -106,7 +123,7 @@ Submit a video. Non-blocking — returns `job_id` immediately.
 | `defect` | No | `"defective"` or `"non-defective"`. Defaults to `"unclassified"`. |
 
 ```bash
-curl -X POST "http://<host>/api/v1/inference/submit-job" \
+curl -X POST "http://tangentthoughttech.com:8084/api/v1/inference/submit-job" \
   -F "video=@/path/to/video.mp4" \
   -F "job_id=JOB-001" \
   -F "defect=non-defective"
@@ -130,10 +147,10 @@ curl -X POST "http://<host>/api/v1/inference/submit-job" \
 
 ### GET /api/v1/inference/result?job_id=JOB-001
 
-Poll every 3–5 s until `status == "completed"`. Processing takes ~90–120 s.
+Poll every 3–5 s until `status == "completed"`. Typical processing time: **20–35 s**.
 
 ```bash
-curl "http://<host>/api/v1/inference/result?job_id=JOB-001"
+curl "http://tangentthoughttech.com:8084/api/v1/inference/result?job_id=JOB-001"
 ```
 
 **While processing:**
@@ -149,14 +166,14 @@ curl "http://<host>/api/v1/inference/result?job_id=JOB-001"
   "data": {
     "job_id": "JOB-001",
     "submitted_at": "2026-09-18T08:00:00Z",
-    "completed_at": "2026-09-18T08:02:05Z",
+    "completed_at": "2026-09-18T08:00:25Z",
     "input_defect_flag": "non-defective",
     "verdict": "pass",
     "confidence": 0.847,
     "proof": {
       "frame_index": 210,
       "timestamp_in_video": "00:00:17.500",
-      "image_url": "http://<host>/proofs/JOB-001/frame_210.jpg",
+      "image_url": "http://tangentthoughttech.com:8084/proofs/JOB-001/frame_210.jpg",
       "bounding_box": { "x": 145, "y": 62, "width": 80, "height": 44 },
       "defect_type": "all_present"
     },
@@ -189,7 +206,7 @@ curl "http://<host>/api/v1/inference/result?job_id=JOB-001"
 ### GET /api/v1/inference/status?rows=10
 
 ```bash
-curl "http://<host>/api/v1/inference/status?rows=10"
+curl "http://tangentthoughttech.com:8084/api/v1/inference/status?rows=10"
 ```
 
 ```json
@@ -227,4 +244,30 @@ loop every 3–5 s:
     "completed"   →  read data.verdict + data.proof.image_url  ✓
     "job_failed"  →  read data.error_detail
     success=false →  read status field for error code
+```
+
+---
+
+## v6a EfficientNet-B0 (port 8083)
+
+Same API V1 spec, different model. Replace `:8084` with `:8083` in all URLs above.
+
+### Build and run
+
+```bash
+docker build -f Dockerfile.v6a -t ip4r-v6a:latest .
+
+docker run -d --name ip4r_v6a \
+  -p 8083:8083 \
+  -v $(pwd)/models/v6a/best.pth:/models/v6a_best.pth:ro \
+  -v ip4r_v6a_proofs:/tmp/v6a_proofs \
+  -e V6A_MODEL=/models/v6a_best.pth \
+  -e PUBLIC_HOST=http://<your-host>:8083 \
+  --restart unless-stopped \
+  ip4r-v6a:latest
+```
+
+```bash
+curl http://localhost:8083/health
+# {"status":"ok","version":"v6a","model":"EfficientNet-B0","pending":0,"processing":0}
 ```
