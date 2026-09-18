@@ -45,7 +45,7 @@ for _d in (UPLOAD_DIR, PROOF_DIR):
 
 # ── Load model once at startup ────────────────────────────────────────────────
 print(f"Loading v6a EfficientNet model: {V6A_MODEL}")
-_pipeline = V6aPipeline(V6A_MODEL, use_abstain=True)
+_pipeline = V6aPipeline(V6A_MODEL, use_abstain=False)
 print("Model ready.")
 
 # ── Job store ─────────────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ def _err(status, message, data={}, code=400):
                         status_code=code)
 
 def _api_verdict(v: str) -> str:
-    return {"PASS": "pass", "FAIL": "fail", "ABSTAIN": "abstain"}.get(v, "unknown")
+    return {"PASS": "pass", "FAIL": "fail"}.get(v, "unknown")
 
 
 # ── Inference worker ──────────────────────────────────────────────────────────
@@ -141,8 +141,7 @@ def _run(video_path: str, job_id: str) -> dict:
         "proof_path":   proof_path,
         "bbox":         bbox,
         "inference_ms": res.get("inference_ms"),
-        "defect_type":  "all_present" if res["verdict"] == "PASS" else
-                        "uncertain"   if res["verdict"] == "ABSTAIN" else "defect_detected",
+        "defect_type":  "all_present" if res["verdict"] == "PASS" else "defect_detected",
     }
 
 
@@ -310,7 +309,7 @@ _UI = r"""<!doctype html>
   .stats{display:flex;gap:12px}
   .stat{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;text-align:center}
   .stat .n{font-size:1.8rem;font-weight:700} .stat .l{font-size:.72rem;color:var(--muted);margin-top:2px;text-transform:uppercase;letter-spacing:.6px}
-  .stat.pass .n{color:var(--pass)} .stat.abstain .n{color:var(--abstain)} .stat.fail .n{color:var(--fail)} .stat.pend .n{color:var(--accent)}
+  .stat.pass .n{color:var(--pass)} .stat.fail .n{color:var(--fail)} .stat.pend .n{color:var(--accent)}
   .drop-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:36px;text-align:center;cursor:pointer;transition:border-color .2s,background .2s}
   .drop-zone:hover,.drop-zone.drag{border-color:var(--accent);background:rgba(88,166,255,.05)}
   .drop-zone .icon{font-size:2.4rem;margin-bottom:10px}
@@ -366,10 +365,9 @@ _UI = r"""<!doctype html>
 <div class="main">
   <div class="left">
     <div class="stats">
-      <div class="stat pass">   <div class="n" id="c-pass">—</div><div class="l">Pass</div></div>
-      <div class="stat abstain"><div class="n" id="c-abs">—</div> <div class="l">Abstain</div></div>
-      <div class="stat fail">   <div class="n" id="c-fail">—</div><div class="l">Fail</div></div>
-      <div class="stat pend">   <div class="n" id="c-pend">—</div><div class="l">Queue</div></div>
+      <div class="stat pass"><div class="n" id="c-pass">—</div><div class="l">Pass</div></div>
+      <div class="stat fail"><div class="n" id="c-fail">—</div><div class="l">Fail</div></div>
+      <div class="stat pend"><div class="n" id="c-pend">—</div><div class="l">Queue</div></div>
     </div>
     <div class="card">
       <h2>Submit Inspection Job</h2>
@@ -408,15 +406,11 @@ _UI = r"""<!doctype html>
       <div class="legend">
         <div class="legend-item"><div class="legend-dot pass"></div><div>
           <strong>PASS</strong>
-          <p>EfficientNet confidence that the LCD is good exceeds threshold. All segments appear correctly lit.</p>
-        </div></div>
-        <div class="legend-item"><div class="legend-dot abstain"></div><div>
-          <strong>Abstain</strong>
-          <p>Model confidence is in the uncertain zone (p_fail 0.40–0.60). Send to human re-inspection.</p>
+          <p>EfficientNet confidence the LCD is good. p_fail &lt; 0.50.</p>
         </div></div>
         <div class="legend-item"><div class="legend-dot fail"></div><div>
           <strong>FAIL</strong>
-          <p>EfficientNet predicts defect with high confidence (p_fail &gt; 0.60).</p>
+          <p>EfficientNet predicts defect. p_fail ≥ 0.50.</p>
         </div></div>
       </div>
     </div>
@@ -426,8 +420,7 @@ _UI = r"""<!doctype html>
         <dt>Version</dt>      <dd>v6a</dd>
         <dt>Model</dt>        <dd>EfficientNet-B0</dd>
         <dt>Input</dt>        <dd>480×640 crop</dd>
-        <dt>FAIL thr</dt>     <dd>p_fail &gt; 0.60</dd>
-        <dt>ABSTAIN zone</dt> <dd>0.40 – 0.60</dd>
+        <dt>FAIL thr</dt>     <dd>p_fail ≥ 0.50</dd>
         <dt>Candidates</dt>   <dd>6 frames</dd>
         <dt>Port</dt>         <dd>8083</dd>
         <dt>API</dt>          <dd>v1</dd>
@@ -468,8 +461,8 @@ function showWaiting(jid){
   document.getElementById('result-box').innerHTML=`<span class="spinner"></span> Processing <code>${jid}</code>…<div class="progress-bar"><div class="progress-fill" id="prog-fill"></div></div>`
 }
 function showResult(d,jid){
-  const v=d.verdict||'unknown';const cls=v==='pass'?'pass':v==='abstain'?'abstain':'fail';
-  const emoji=v==='pass'?'✅':v==='abstain'?'⚠️':'❌';
+  const v=d.verdict||'unknown';const cls=v==='pass'?'pass':'fail';
+  const emoji=v==='pass'?'✅':'❌';
   const det=d.detail||{};const pf=det.prob_fail!=null?` — p_fail=${det.prob_fail.toFixed(3)}`:'';
   const conf=d.confidence!=null?`  confidence ${(d.confidence*100).toFixed(1)}%`:'';
   let proofHTML='';
@@ -484,9 +477,9 @@ function showResult(d,jid){
 }
 async function refreshHistory(){
   try{const r=await fetch('/api/v1/inference/status?rows=50');const env=await r.json();if(!env.success)return;
-  const jobs=env.data.jobs;let p=0,a=0,f=0;
-  jobs.forEach(j=>{if(j.verdict==='pass')p++;else if(j.verdict==='abstain')a++;else if(j.verdict==='fail')f++});
-  document.getElementById('c-pass').textContent=p;document.getElementById('c-abs').textContent=a;document.getElementById('c-fail').textContent=f;
+  const jobs=env.data.jobs;let p=0,f=0;
+  jobs.forEach(j=>{if(j.verdict==='pass')p++;else if(j.verdict==='fail')f++});
+  document.getElementById('c-pass').textContent=p;document.getElementById('c-fail').textContent=f;
   if(!jobs.length){document.getElementById('history-body').innerHTML='<div class="empty-state">No jobs yet</div>';return}
   const rows=jobs.map(j=>{const v=j.verdict||j.state||'—';const t=j.submitted_at?new Date(j.submitted_at).toLocaleTimeString():'—';
     return`<tr><td style="color:var(--muted)">${t}</td><td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${j.job_id||'—'}</td><td><span class="vbadge ${v}">${v}</span></td><td style="color:var(--muted)">${j.state||'—'}</td></tr>`

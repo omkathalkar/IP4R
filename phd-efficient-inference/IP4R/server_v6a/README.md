@@ -142,9 +142,8 @@ curl "http://tangentthoughttech.com:8083/api/v1/inference/result?job_id=JOB-001"
 
 | `verdict` | Meaning |
 |-----------|---------|
-| `"pass"` | EfficientNet confidence the LCD is good exceeds threshold (`p_fail < 0.40`) |
-| `"fail"` | Defect predicted with high confidence (`p_fail > 0.60`) |
-| `"abstain"` | Confidence in uncertain zone (`p_fail 0.40–0.60`) — send to human re-inspection |
+| `"pass"` | EfficientNet predicts LCD is good (`p_fail < 0.50`) |
+| `"fail"` | EfficientNet predicts defect (`p_fail ≥ 0.50`) |
 
 ---
 
@@ -187,7 +186,7 @@ POST /submit-job  →  save job_id
 loop every 3–5 s:
   GET /result?job_id=<id>
     "processing"  →  keep polling
-    "completed"   →  read data.verdict + data.proof.image_url  ✓
+    "completed"   →  read data.verdict ("pass" or "fail") + data.proof.image_url  ✓
     "job_failed"  →  read data.error_detail
     success=false →  read status field for error code
 ```
@@ -215,5 +214,5 @@ loop every 3–5 s:
 | Model | EfficientNet-B0 (CNN) | 3-phase YOLO |
 | Speed | ~1–3 s | ~20–35 s |
 | `proof.frame_index` | `null` (whole-frame classifier) | integer |
-| `verdict` basis | `p_fail` probability threshold | per-icon checklist (15 icons) |
-| ABSTAIN zone | `p_fail` 0.40–0.60 | icon glimpsed but not confirmed |
+| `verdict` basis | `p_fail` threshold (binary PASS/FAIL) | per-icon checklist (15 icons) |
+| Verdicts | `pass` / `fail` | `pass` / `fail` / `abstain` |
